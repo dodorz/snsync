@@ -3,11 +3,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/dodorz/snsync/internal/config"
@@ -38,6 +42,8 @@ func main() {
 		err = runLogin(opts.configPath, opts.token)
 	case "sync":
 		err = runSync(opts.configPath, opts.dryRun, opts.full)
+	case "watch":
+		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.interval)
 	case "status":
 		err = runStatus(opts.configPath)
 	case "version":
@@ -60,10 +66,11 @@ type options struct {
 	dryRun     bool
 	full       bool
 	token      string
+	interval   time.Duration
 }
 
 func parseArgs(args []string) (*options, error) {
-	o := &options{configPath: defaultConfigPath()}
+	o := &options{configPath: defaultConfigPath(), interval: 60 * time.Second}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -85,6 +92,22 @@ func parseArgs(args []string) (*options, error) {
 			o.token = args[i]
 		case strings.HasPrefix(a, "--token="):
 			o.token = strings.TrimPrefix(a, "--token=")
+		case a == "--interval" || a == "-interval":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			d, err := time.ParseDuration(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("invalid --interval: %w", err)
+			}
+			o.interval = d
+		case strings.HasPrefix(a, "--interval="):
+			d, err := time.ParseDuration(strings.TrimPrefix(a, "--interval="))
+			if err != nil {
+				return nil, fmt.Errorf("invalid --interval: %w", err)
+			}
+			o.interval = d
 		case a == "-dry-run" || a == "--dry-run":
 			o.dryRun = true
 		case a == "-full" || a == "--full":
@@ -100,6 +123,12 @@ func parseArgs(args []string) (*options, error) {
 				return nil, fmt.Errorf("unexpected argument %q", a)
 			}
 			o.command = a
+		}
+	}
+	switch cmd := o.command; cmd {
+	case "watch":
+		if o.interval <= 0 {
+			return nil, fmt.Errorf("--interval must be positive")
 		}
 	}
 	return o, nil
@@ -236,6 +265,44 @@ func runSync(path string, dry, full bool) error {
 	return nil
 }
 
+func runWatch(path string, dry, full bool, interval time.Duration) error {
+	cfg, sn, st, err := load(path)
+	if err != nil {
+		return err
+	}
+	eng := syncpkg.New(cfg, sn, st)
+	eng.Log = func(format string, args ...any) {
+		fmt.Printf(format+"\n", args...)
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	fmt.Printf("watching every %s (Ctrl-C to stop)\n", interval)
+	first := true
+	for {
+		// Force a full sync on the first pass only; later passes use the
+		// incremental cursor and the periodic full-sync counter.
+		eng.Full = full && first
+		if err := eng.Run(dry); err != nil {
+			var authErr *simperium.AuthError
+			if errors.As(err, &authErr) {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "sync error: %v\n", err)
+		} else {
+			first = false
+		}
+
+		select {
+		case <-ctx.Done():
+			fmt.Println("stopped")
+			return nil
+		case <-time.After(interval):
+		}
+	}
+}
+
 func runStatus(path string) error {
 	_, _, st, err := load(path)
 	if err != nil {
@@ -298,6 +365,7 @@ commands:
   init      write a starter config file
   login     authenticate and cache an access token
   sync      run one reconciliation pass
+  watch     keep syncing on an interval until interrupted
   status    show sync state summary
   version   print the program version
   help      show this message
@@ -306,6 +374,7 @@ flags:
   -c, --config <path>   config file (default ~/.config/snsync/config.json)
       --dry-run         show what would happen without writing anything
       --full            force a full reconciliation (ignore the cursor)
+      --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s)
       --token <value>   save a token obtained elsewhere (login only)
   -v, --version         print the program version
 `)

@@ -18,8 +18,36 @@ version-control workflow can read and write it.
 
 ## Install
 
-Requires Go 1.21+. The build has no external dependencies and produces a
-single static binary:
+### Download a release
+
+Prebuilt static binaries for Linux, macOS and Windows (amd64 + arm64) are
+attached to every [release](https://github.com/dodorz/snsync/releases):
+
+```sh
+VERSION=0.1.2
+curl -L -o snsync "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-linux-amd64"
+chmod +x snsync
+```
+
+On Windows, install it with [Scoop](https://scoop.sh):
+
+```powershell
+scoop bucket add dodorz https://github.com/dodorz/scoop
+scoop install snsync
+```
+
+### With Go
+
+```sh
+go install github.com/dodorz/snsync/cmd/snsync@latest
+```
+
+`go install` builds without a version number, so `snsync version` prints `dev`.
+Use the release binary or `make build` if you want a real version string.
+
+### From source
+
+Requires Go 1.21+. No external dependencies; produces a single static binary:
 
 ```sh
 make build          # injects the version from git describe
@@ -68,6 +96,10 @@ git tag 0.1.2 && git push origin 0.1.2
 # force a full reconciliation (ignore the incremental cursor)
 ./snsync sync --full
 
+# keep syncing until interrupted (polls every 60s by default)
+./snsync watch
+./snsync watch --interval 90s
+
 # show state
 ./snsync status
 ```
@@ -80,9 +112,20 @@ point elsewhere.
   "email": "you@example.com",
   "local_dir": "~/Notes",
   "app_id": "chalk-bump-f49",
-  "app_key": "26864ab5d6fd4a37b80343439f107350"
+  "app_key": "26864ab5d6fd4a37b80343439f107350",
+  "full_sync_every": 10
 }
 ```
+
+All keys except `email` and `local_dir` are optional:
+
+| key | default | meaning |
+|---|---|---|
+| `app_id`, `app_key` | the shared community credentials | Simperium app identity |
+| `full_sync_every` | `10` | force a full reconciliation after this many incremental syncs (`0` disables) |
+| `auth_host`, `api_host` | `https://auth.simperium.com`, `https://api.simperium.com` | override the Simperium hosts, e.g. when one is blocked |
+| `state_file` | `<local_dir>/.snsync/state.json` | where sync bookkeeping lives |
+| `trash_dir` | `<local_dir>/.snsync/trash` | where locally deleted notes go |
 
 After `login` an access token is cached in the same file. The password is never
 required again (and never stored unless you put it there). You can also supply
@@ -121,6 +164,14 @@ In incremental mode a tracked note absent from the response is assumed
 unchanged rather than missing, so nothing is deleted locally by omission. If a
 local file was removed, the note is fetched once before being trashed so its
 body is preserved.
+
+### Watch mode
+
+`snsync watch` runs a sync, waits `--interval` (default 60s), then repeats
+until interrupted with Ctrl-C. The first pass is a full reconciliation (or
+forced full with `--full`); later passes use the incremental cursor and the
+periodic full-sync counter. Transient errors (network) are logged and retried
+on the next tick; an authentication error stops the loop.
 
 ### Files and names
 
