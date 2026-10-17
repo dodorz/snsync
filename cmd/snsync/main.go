@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/dodorz/snsync/internal/config"
 	"github.com/dodorz/snsync/internal/simperium"
@@ -32,7 +33,7 @@ func main() {
 	case "login":
 		err = runLogin(opts.configPath, opts.token)
 	case "sync":
-		err = runSync(opts.configPath, opts.dryRun)
+		err = runSync(opts.configPath, opts.dryRun, opts.full)
 	case "status":
 		err = runStatus(opts.configPath)
 	case "help":
@@ -51,6 +52,7 @@ type options struct {
 	command    string
 	configPath string
 	dryRun     bool
+	full       bool
 	token      string
 }
 
@@ -79,6 +81,8 @@ func parseArgs(args []string) (*options, error) {
 			o.token = strings.TrimPrefix(a, "--token=")
 		case a == "-dry-run" || a == "--dry-run":
 			o.dryRun = true
+		case a == "-full" || a == "--full":
+			o.full = true
 		case a == "-h" || a == "--help":
 			o.command = "help"
 		case strings.HasPrefix(a, "-"):
@@ -203,12 +207,13 @@ func newClient(cfg *config.Config, token string) *simperium.Client {
 	return sn
 }
 
-func runSync(path string, dry bool) error {
+func runSync(path string, dry, full bool) error {
 	cfg, sn, st, err := load(path)
 	if err != nil {
 		return err
 	}
 	eng := syncpkg.New(cfg, sn, st)
+	eng.Full = full
 	eng.Log = func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -241,6 +246,10 @@ func runStatus(path string) error {
 	}
 	fmt.Printf("state file:   %s\n", st.Path())
 	fmt.Printf("cursor:       %s\n", st.Cursor)
+	if st.LastFullSync > 0 {
+		fmt.Printf("last full:    %s\n", time.Unix(int64(st.LastFullSync), 0).Format(time.RFC3339))
+	}
+	fmt.Printf("since full:   %d incremental sync(s)\n", st.IncrementalSinceFull)
 	fmt.Printf("notes:        %d (%d deleted, %d not yet pushed)\n", len(st.Notes), deleted, pending)
 	return nil
 }
@@ -287,6 +296,7 @@ commands:
 flags:
   -c, --config <path>   config file (default ~/.config/snsync/config.json)
       --dry-run         show what would happen without writing anything
+      --full            force a full reconciliation (ignore the cursor)
       --token <value>   save a token obtained elsewhere (login only)
 `)
 }

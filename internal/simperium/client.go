@@ -287,6 +287,16 @@ func (c *Client) Save(key string, n Note) (string, *Note, error) {
 	return key, &out, nil
 }
 
+// Get fetches a single note by key.
+func (c *Client) Get(key string) (*Note, error) {
+	u := fmt.Sprintf("%s/1/%s/%s/i/%s", c.APIHost, c.AppID, NoteBucket, url.PathEscape(key))
+	var n Note
+	if err := c.doJSON(http.MethodGet, u, nil, &n); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
 // Delete permanently removes a note (hard delete). Prefer marking
 // Note.Deleted = true to move a note to the trash.
 func (c *Client) Delete(key string) error {

@@ -42,6 +42,9 @@ CGO_ENABLED=0 go build -trimpath -o snsync ./cmd/snsync
 # preview without touching anything
 ./snsync sync -dry-run
 
+# force a full reconciliation (ignore the incremental cursor)
+./snsync sync --full
+
 # show state
 ./snsync status
 ```
@@ -83,6 +86,19 @@ Deletions travel in both directions. Nothing is ever hard-deleted: local files
 go to `.snsync/trash/`, remote notes get `deleted: true` (Simplenote's own
 trash).
 
+### Incremental sync
+
+After the first run the engine remembers Simperium's index cursor (`current`)
+and only fetches notes changed since then. Because a hard-deleted note simply
+vanishes from incremental data, a **full reconciliation runs every
+`full_sync_every` incremental syncs** (default 10; set `0` to disable, which
+means full syncs only happen on the first run and with `--full`).
+
+In incremental mode a tracked note absent from the response is assumed
+unchanged rather than missing, so nothing is deleted locally by omission. If a
+local file was removed, the note is fetched once before being trashed so its
+body is preserved.
+
 ### Files and names
 
 - One `.md` file per note. The file name is derived from the note title (the
@@ -123,9 +139,6 @@ answers Go's HTTP/2 requests with a spurious `403 Forbidden`.
 
 - Uses unofficial, shared credentials. Be polite: sync on demand, do not poll
   aggressively. If Automattic revokes the key, everything stops working.
-- The current version fetches the full note index on every run. An incremental
-  mode (Simperium's `since` cursor) is planned but full reconciliation is kept
-  for correctness, since hard-deleted notes never appear in incremental data.
 - This is a personal-scale tool, not a hosted service.
 
 ## Development

@@ -35,6 +35,10 @@ type Config struct {
 	AuthHost string `json:"auth_host,omitempty"`
 	APIHost  string `json:"api_host,omitempty"`
 
+	// FullSyncEvery forces a full reconciliation after this many incremental
+	// syncs (0 disables periodic full syncs). Defaults to 10.
+	FullSyncEvery int `json:"full_sync_every,omitempty"`
+
 	path string
 }
 
@@ -69,6 +73,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.LocalDir != "" && c.TrashDir == "" {
 		c.TrashDir = filepath.Join(c.LocalDir, ".snsync", "trash")
+	}
+	if c.FullSyncEvery == 0 {
+		c.FullSyncEvery = 10
 	}
 	if c.StateFile != "" {
 		c.StateFile = expandHome(c.StateFile)

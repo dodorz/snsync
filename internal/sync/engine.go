@@ -19,11 +19,12 @@ import (
 
 // Engine performs one reconciliation pass.
 type Engine struct {
-	cfg  *config.Config
-	sn   *simperium.Client
-	st   *store.State
-	Log  func(format string, args ...any)
-	Full bool
+	cfg      *config.Config
+	sn       *simperium.Client
+	st       *store.State
+	Log      func(format string, args ...any)
+	Full     bool // force a full reconciliation
+	fullSync bool // whether the current run is a full reconciliation
 }
 
 // New builds an engine.
@@ -61,6 +62,16 @@ type work struct {
 	createRemote    bool
 	updateRemote    bool
 	pushedDelete    bool
+
+	// remoteUnknown marks a tracked note that was not part of an incremental
+	// index response, so its server state is assumed unchanged.
+	remoteUnknown bool
+	// needRemoteContent means the remote note must be fetched before pushing,
+	// so trashing it does not wipe its content.
+	needRemoteContent bool
+	// preserveBase keeps the stored base hash instead of recomputing it from
+	// content we do not have (incremental tombstones).
+	preserveBase bool
 }
 
 // Run executes one full sync pass. When dryRun is set nothing is written.
@@ -77,8 +88,15 @@ func (e *Engine) Run(dryRun bool) error {
 		}
 	}
 
-	e.Log("fetching note index from Simplenote...")
-	remotes, cursor, err := e.sn.Index("")
+	e.fullSync = e.shouldFullSync()
+	since := ""
+	if e.fullSync {
+		e.Log("full sync: fetching complete note index...")
+	} else {
+		since = e.st.Cursor
+		e.Log("incremental sync since cursor %s...", since)
+	}
+	remotes, cursor, err := e.sn.Index(since)
 	if err != nil {
 		return e.wrapAuth(err)
 	}
@@ -86,7 +104,11 @@ func (e *Engine) Run(dryRun bool) error {
 	for _, r := range remotes {
 		remoteByID[r.ID] = r
 	}
-	e.Log("server has %d notes", len(remoteByID))
+	if e.fullSync {
+		e.Log("server has %d notes", len(remoteByID))
+	} else {
+		e.Log("%d note(s) changed remotely", len(remoteByID))
+	}
 
 	works := e.buildWorks(remoteByID)
 	e.decideAll(works)
@@ -107,10 +129,28 @@ func (e *Engine) Run(dryRun bool) error {
 		e.Log("dry run: state not saved")
 		return nil
 	}
+	if e.fullSync {
+		e.st.IncrementalSinceFull = 0
+		e.st.LastFullSync = float64(time.Now().Unix())
+	} else {
+		e.st.IncrementalSinceFull++
+	}
 	if err := e.st.Save(); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
 	return nil
+}
+
+// shouldFullSync decides whether this run reconciles the whole account or only
+// applies the changes since the stored cursor.
+func (e *Engine) shouldFullSync() bool {
+	if e.Full || e.st.Cursor == "" {
+		return true
+	}
+	if e.cfg.FullSyncEvery <= 0 {
+		return false
+	}
+	return e.st.IncrementalSinceFull >= e.cfg.FullSyncEvery
 }
 
 // buildWorks turns the state file, the server index and the local directory
@@ -131,6 +171,10 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			w.remote = &rr
 			w.remoteExists = true
 			delete(remoteByID, w.st.ServerKey)
+		} else if !e.fullSync {
+			// Incremental index only returns changed notes, so an absent
+			// tracked note simply has not changed.
+			w.remoteUnknown = true
 		}
 	}
 
@@ -236,6 +280,13 @@ func (e *Engine) decide(w *work) {
 	}
 
 	hasBase := w.st.ServerKey != ""
+
+	// Incremental sync: the server state of this tracked note is unknown but
+	// assumed unchanged, so only local edits are acted on.
+	if w.remoteUnknown {
+		w.decideLocalOnly()
+		return
+	}
 
 	if w.remote == nil && !hasBase {
 		// Brand new local note (or rename of one).
@@ -345,6 +396,36 @@ func (w *work) pushLocal() {
 	w.finalTags = w.st.Tags
 	w.finalSystemTags = w.st.SystemTags
 	w.updateRemote = true
+}
+
+// decideLocalOnly reconciles a tracked note whose server state was not part of
+// an incremental index response, so only local changes are considered.
+func (w *work) decideLocalOnly() {
+	switch {
+	case w.localExists && w.st.Deleted:
+		// Remote is still trashed but a local file exists again: re-create it.
+		w.finalContent = w.localContent
+		w.finalTags = w.st.Tags
+		w.finalSystemTags = w.st.SystemTags
+		w.createRemote = true
+	case w.localExists && w.localHash != w.st.BaseHash:
+		w.pushLocal()
+	case w.localExists:
+		// Unchanged; keep the file and the recorded base hash.
+		w.finalContent = w.localContent
+		w.finalTags = w.st.Tags
+		w.finalSystemTags = w.st.SystemTags
+		w.preserveBase = true
+	default:
+		// Local file removed: propagate the deletion.
+		w.finalDeleted = true
+		w.preserveBase = true
+		if !w.st.Deleted {
+			w.updateRemote = true
+			w.pushedDelete = true
+			w.needRemoteContent = true
+		}
+	}
 }
 
 // addConflictCopies turns a detected conflict into an extra local note holding
@@ -472,6 +553,19 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 		if !w.createRemote && !w.updateRemote {
 			continue
 		}
+		// In incremental mode a local deletion is propagated without having
+		// fetched the note; fetch it first so its content is not wiped.
+		if w.needRemoteContent && w.st != nil && w.st.ServerKey != "" {
+			if rn, err := e.sn.Get(w.st.ServerKey); err == nil && rn != nil {
+				w.finalContent = rn.Content
+				if w.finalTags == nil {
+					w.finalTags = rn.Tags
+				}
+				if w.finalSystemTags == nil {
+					w.finalSystemTags = rn.SystemTags
+				}
+			}
+		}
 		note := simperium.Note{
 			Content:          w.finalContent,
 			Deleted:          w.finalDeleted,
@@ -523,9 +617,13 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 				continue
 			}
 		}
+		baseHash := store.HashContent(w.finalContent)
+		if w.preserveBase && w.st != nil && w.st.BaseHash != "" {
+			baseHash = w.st.BaseHash
+		}
 		ns := &store.NoteState{
 			ID:         w.id,
-			BaseHash:   store.HashContent(w.finalContent),
+			BaseHash:   baseHash,
 			Tags:       w.finalTags,
 			SystemTags: w.finalSystemTags,
 			Deleted:    w.finalDeleted,

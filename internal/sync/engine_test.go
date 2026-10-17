@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -17,15 +18,30 @@ import (
 
 // fakeServer is a tiny in-memory stand-in for the Simperium API.
 type fakeServer struct {
-	mu     sync.Mutex
-	notes  map[string]simperium.Note
-	vers   map[string]int
-	cv     int
-	pushes int
+	mu       sync.Mutex
+	notes    map[string]simperium.Note
+	vers     map[string]int
+	changeCV map[string]int
+	cv       int
+	pushes   int
 }
 
 func newFakeServer() *fakeServer {
-	return &fakeServer{notes: map[string]simperium.Note{}, vers: map[string]int{}}
+	return &fakeServer{
+		notes:    map[string]simperium.Note{},
+		vers:     map[string]int{},
+		changeCV: map[string]int{},
+	}
+}
+
+// put stores a note and bumps the change cursor, as a real server change would.
+func (f *fakeServer) put(id string, n simperium.Note) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.cv++
+	f.notes[id] = n
+	f.vers[id]++
+	f.changeCV[id] = f.cv
 }
 
 func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -37,6 +53,11 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(path, "/authorize/"):
 		writeJSON(w, map[string]string{"access_token": "tok"})
 	case strings.HasSuffix(path, "/note/index"):
+		sinceRaw := r.URL.Query().Get("since")
+		since := 0
+		if sinceRaw != "" {
+			since, _ = strconv.Atoi(sinceRaw)
+		}
 		type item struct {
 			ID string          `json:"id"`
 			V  int             `json:"v"`
@@ -46,15 +67,26 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Current string `json:"current"`
 			Count   int    `json:"count"`
 			Index   []item `json:"index"`
-		}{Current: "cv-test", Count: len(f.notes)}
+		}{Current: strconv.Itoa(f.cv)}
 		for id, n := range f.notes {
+			if sinceRaw != "" && f.changeCV[id] <= since {
+				continue
+			}
 			d, _ := json.Marshal(n)
 			resp.Index = append(resp.Index, item{ID: id, V: f.vers[id], D: d})
 		}
+		resp.Count = len(resp.Index)
 		writeJSON(w, resp)
 	case strings.Contains(path, "/note/i/"):
 		id := path[strings.LastIndex(path, "/i/")+3:]
 		switch r.Method {
+		case http.MethodGet:
+			n, ok := f.notes[id]
+			if !ok {
+				http.NotFound(w, r)
+				return
+			}
+			writeJSON(w, n)
 		case http.MethodPost:
 			var n simperium.Note
 			_ = json.NewDecoder(r.Body).Decode(&n)
@@ -65,11 +97,13 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.notes[id] = n
 			f.vers[id]++
 			f.cv++
+			f.changeCV[id] = f.cv
 			f.pushes++
 			writeJSON(w, n)
 		case http.MethodDelete:
 			delete(f.notes, id)
 			delete(f.vers, id)
+			delete(f.changeCV, id)
 			w.WriteHeader(http.StatusOK)
 		}
 	default:
@@ -123,6 +157,15 @@ func (h *harness) run(t *testing.T) {
 	t.Helper()
 	if err := h.eng.Run(false); err != nil {
 		t.Fatalf("sync: %v", err)
+	}
+}
+
+func (h *harness) runFull(t *testing.T) {
+	t.Helper()
+	h.eng.Full = true
+	defer func() { h.eng.Full = false }()
+	if err := h.eng.Run(false); err != nil {
+		t.Fatalf("full sync: %v", err)
 	}
 }
 
@@ -219,11 +262,10 @@ func TestPushNewLocalFile(t *testing.T) {
 
 func TestPullNewRemoteNote(t *testing.T) {
 	h := newHarness(t)
-	h.srv.notes["abc"] = simperium.Note{
+	h.srv.put("abc", simperium.Note{
 		Content: "from the server", Tags: []string{"work"},
-		SystemTags: []string{"pinned"}, ModificationDate: 5,
-	}
-	h.srv.vers["abc"] = 1
+		SystemTags: []string{"pinned"},
+	})
 	h.run(t)
 
 	got := h.read(t, "from the server.md")
@@ -269,15 +311,13 @@ func TestLocalDeletePropagates(t *testing.T) {
 
 func TestRemoteDeleteTrashesLocal(t *testing.T) {
 	h := newHarness(t)
-	h.srv.notes["xyz"] = simperium.Note{Content: "to be trashed", ModificationDate: 5}
-	h.srv.vers["xyz"] = 1
+	h.srv.put("xyz", simperium.Note{Content: "to be trashed"})
 	h.run(t)
 	if _, err := os.Stat(filepath.Join(h.dir, "to be trashed.md")); err != nil {
 		t.Fatalf("note was not pulled: %v", err)
 	}
 
-	h.srv.notes["xyz"] = simperium.Note{Content: "to be trashed", Deleted: true, ModificationDate: 6}
-	h.srv.vers["xyz"] = 2
+	h.srv.put("xyz", simperium.Note{Content: "to be trashed", Deleted: true})
 	h.run(t)
 
 	if _, err := os.Stat(filepath.Join(h.dir, "to be trashed.md")); !os.IsNotExist(err) {
@@ -302,9 +342,7 @@ func TestConflictCreatesCopy(t *testing.T) {
 
 	// Both sides change the same note.
 	h.write(t, fname, "local edit")
-	h.srv.notes[id] = simperium.Note{Content: "remote edit", ModificationDate: 9}
-	h.srv.vers[id]++
-
+	h.srv.put(id, simperium.Note{Content: "remote edit"})
 	h.run(t)
 
 	// The canonical note keeps the remote version.
@@ -324,5 +362,97 @@ func TestConflictCreatesCopy(t *testing.T) {
 	}
 	if len(names) != 1 {
 		t.Fatalf("expected one conflict copy, got %v", names)
+	}
+}
+
+func TestIncrementalPullDoesNotDeleteUntouchedNotes(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "alpha"})
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "alpha.md")); err != nil {
+		t.Fatalf("alpha not pulled: %v", err)
+	}
+	if h.st.IncrementalSinceFull != 0 {
+		t.Fatalf("a full sync should not bump the incremental counter, got %d", h.st.IncrementalSinceFull)
+	}
+
+	h.srv.put("b", simperium.Note{Content: "beta"})
+	h.run(t)
+
+	if _, err := os.Stat(filepath.Join(h.dir, "beta.md")); err != nil {
+		t.Fatalf("beta not pulled incrementally: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "alpha.md")); err != nil {
+		t.Fatalf("untouched note was deleted during incremental sync: %v", err)
+	}
+	if h.st.IncrementalSinceFull != 1 {
+		t.Fatalf("expected 1 incremental sync, got %d", h.st.IncrementalSinceFull)
+	}
+}
+
+func TestIncrementalLocalDeleteKeepsRemoteContent(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "keep my body"})
+	h.run(t)
+	st := h.stateByServerKey("a")
+	if st == nil {
+		t.Fatal("pull failed")
+	}
+	if err := os.Remove(filepath.Join(h.dir, st.Filename)); err != nil {
+		t.Fatal(err)
+	}
+	h.run(t)
+
+	n := h.srv.notes["a"]
+	if !n.Deleted {
+		t.Fatal("local deletion not propagated incrementally")
+	}
+	if n.Content != "keep my body" {
+		t.Fatalf("trashing wiped remote content: %q", n.Content)
+	}
+}
+
+func TestPurgedNoteOnlyDetectedOnFullSync(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "purge me"})
+	h.run(t)
+	st := h.stateByServerKey("a")
+	if st == nil {
+		t.Fatal("pull failed")
+	}
+	fname := st.Filename
+
+	// Simulate a hard delete: the note vanishes without a change entry.
+	h.srv.mu.Lock()
+	delete(h.srv.notes, "a")
+	h.srv.mu.Unlock()
+
+	h.run(t) // incremental: absence is indistinguishable from "unchanged"
+	if _, err := os.Stat(filepath.Join(h.dir, fname)); err != nil {
+		t.Fatalf("incremental sync should keep the local file: %v", err)
+	}
+
+	h.runFull(t) // full reconciliation notices the purge
+	if _, err := os.Stat(filepath.Join(h.dir, fname)); !os.IsNotExist(err) {
+		t.Fatal("full sync should have trashed the local file")
+	}
+	if st := h.stateByServerKey("a"); st != nil {
+		t.Fatalf("purged note should be dropped from state, got %+v", st)
+	}
+}
+
+func TestPeriodicFullSync(t *testing.T) {
+	h := newHarness(t)
+	h.cfg.FullSyncEvery = 2
+	h.srv.put("a", simperium.Note{Content: "alpha"})
+	h.run(t) // full, counter stays 0
+	h.run(t) // incremental, counter 1
+	h.run(t) // incremental, counter 2
+	if h.st.IncrementalSinceFull != 2 {
+		t.Fatalf("counter should be 2, got %d", h.st.IncrementalSinceFull)
+	}
+	h.run(t) // counter hit the limit: full sync, reset to 0
+	if h.st.IncrementalSinceFull != 0 {
+		t.Fatalf("periodic full sync did not reset the counter: %d", h.st.IncrementalSinceFull)
 	}
 }

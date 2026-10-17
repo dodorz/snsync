@@ -28,6 +28,13 @@ type State struct {
 	Cursor string                `json:"cursor,omitempty"`
 	Notes  map[string]*NoteState `json:"notes"`
 
+	// IncrementalSinceFull counts how many incremental syncs have run since
+	// the last full reconciliation; a full sync is forced periodically so
+	// that hard-deleted notes (which never appear in incremental data) are
+	// noticed.
+	IncrementalSinceFull int     `json:"incremental_since_full,omitempty"`
+	LastFullSync         float64 `json:"last_full_sync,omitempty"`
+
 	path string
 }
 
