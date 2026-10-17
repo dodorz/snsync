@@ -20,20 +20,22 @@ version-control workflow can read and write it.
 
 ### Download a release
 
-Prebuilt static binaries for Linux, macOS and Windows (amd64 + arm64) are
-attached to every [release](https://github.com/dodorz/snsync/releases):
+Prebuilt binaries for Linux and macOS (amd64 + arm64) are attached to every
+[release](https://github.com/dodorz/snsync/releases), and Windows builds ship
+as a `.7z` archive containing `snsync.exe` and `README.md`:
 
 ```sh
-VERSION=0.1.2
+# Linux / macOS
+VERSION=0.1.3
 curl -L -o snsync "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-linux-amd64"
 chmod +x snsync
 ```
 
-On Windows, install it with [Scoop](https://scoop.sh):
-
 ```powershell
-scoop bucket add dodorz https://github.com/dodorz/scoop
-scoop install snsync
+# Windows
+$VERSION = '0.1.3'
+curl.exe -L -o snsync.7z "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-windows-amd64.7z"
+7z x snsync.7z
 ```
 
 ### With Go
