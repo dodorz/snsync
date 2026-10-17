@@ -54,6 +54,19 @@ jobs:
           go build -trimpath -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}" \
             -o "dist/snsync-${GITHUB_REF_NAME}-${GOOS}-${GOARCH}${{ matrix.ext }}" \
             ./cmd/snsync
+      - name: Package Windows (7z with exe + README)
+        if: matrix.goos == 'windows'
+        run: |
+          if ! command -v 7z >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq p7zip-full
+          fi
+          staging="staging-${{ matrix.goarch }}"
+          mkdir -p "$staging"
+          cp "dist/snsync-${GITHUB_REF_NAME}-windows-${{ matrix.goarch }}.exe" "$staging/snsync.exe"
+          cp README.md "$staging/README.md"
+          ( cd "$staging" && 7z a -bso0 -bsp0 "../dist/snsync-${GITHUB_REF_NAME}-windows-${{ matrix.goarch }}.7z" ./* )
+          rm -f "dist/snsync-${GITHUB_REF_NAME}-windows-${{ matrix.goarch }}.exe"
       - uses: actions/upload-artifact@v7
         with:
           name: snsync-${{ matrix.goos }}-${{ matrix.goarch }}
