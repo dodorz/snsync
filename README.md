@@ -199,11 +199,18 @@ on the next tick; an authentication error stops the loop.
   next sync — change the note's first line instead. A manual rename that keeps
   the same content is detected by hash and adopted long enough not to create a
   duplicate note.
-- Tags are stored in the front matter's `tags` field (an inline list such as
-  `tags: [work, home]`); a block sequence (`tags:` followed by `- work`) is also
-  accepted. Editing them in the file pushes the new set to Simplenote, and
-  remote changes are written back. The pinned/markdown **system tags** are not
-  written to the file; they live in the state file.
+- Tags are stored in the front matter's `tags` field, one per line:
+
+  ```yaml
+  tags:
+    - work
+    - home
+  ```
+
+  An inline list (`tags: [work, home]`) is also accepted when reading. Editing
+  them in the file pushes the new set to Simplenote, and remote changes are
+  written back. The pinned/markdown **system tags** are not written to the file;
+  they live in the state file.
 - Front matter — a leading `---` (YAML) or `+++` (TOML) block — stays on disk.
   Apart from `tags`, it is ignored when comparing, hashing and uploading, and is
   preserved when the file is updated from the server, so it never appears in

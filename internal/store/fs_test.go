@@ -63,8 +63,8 @@ func TestSetFrontMatterTags(t *testing.T) {
 		tags  []string
 		want  string
 	}{
-		{"", []string{"a", "b"}, "---\ntags: [a, b]\n---\n"},
-		{"---\ntitle: x\ntags: [old]\n---\n", []string{"new"}, "---\ntitle: x\ntags: [new]\n---\n"},
+		{"", []string{"a", "b"}, "---\ntags:\n  - a\n  - b\n---\n"},
+		{"---\ntitle: x\ntags: [old]\n---\n", []string{"new"}, "---\ntitle: x\ntags:\n  - new\n---\n"},
 		{"---\ntitle: x\ntags: [a]\n---\n", nil, "---\ntitle: x\n---\n"},
 		// Dropping the only key drops the whole block.
 		{"---\ntags:\n  - a\n---\n", nil, ""},

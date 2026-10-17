@@ -123,7 +123,10 @@ func SetFrontMatterTags(front string, tags []string) string {
 		out = append(out, line)
 	}
 	if len(tags) > 0 {
-		out = append(out, "tags: "+formatTags(tags))
+		out = append(out, "tags:")
+		for _, t := range tags {
+			out = append(out, "  - "+quoteTag(t))
+		}
 	}
 	if len(out) == 0 {
 		return ""
@@ -178,14 +181,6 @@ func splitInlineTags(s string) []string {
 		out = append(out, part)
 	}
 	return out
-}
-
-func formatTags(tags []string) string {
-	parts := make([]string, len(tags))
-	for i, t := range tags {
-		parts[i] = quoteTag(t)
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 func quoteTag(s string) string {

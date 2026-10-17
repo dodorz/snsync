@@ -269,7 +269,7 @@ func TestPullNewRemoteNote(t *testing.T) {
 	h.run(t)
 
 	got := h.read(t, "from the server.md")
-	want := "---\r\ntags: [work]\r\n---\r\nfrom the server"
+	want := "---\r\ntags:\r\n  - work\r\n---\r\nfrom the server"
 	if got != want {
 		t.Fatalf("unexpected file content: %q, want %q", got, want)
 	}
@@ -532,7 +532,7 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 
 	// Server tags are written into the file's front matter.
 	got := h.read(t, "tagged note.md")
-	if !strings.Contains(got, "tags: [work]") {
+	if !strings.Contains(got, "tags:\r\n  - work") {
 		t.Fatalf("tags not written to front matter: %q", got)
 	}
 
@@ -546,7 +546,7 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 	// A remote tag change is written back into the file.
 	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"remote"}})
 	h.run(t)
-	if got := h.read(t, "tagged note.md"); !strings.Contains(got, "tags: [remote]") {
+	if got := h.read(t, "tagged note.md"); !strings.Contains(got, "tags:\r\n  - remote") {
 		t.Fatalf("remote tags not written to front matter: %q", got)
 	}
 }
