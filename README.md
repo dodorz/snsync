@@ -22,10 +22,22 @@ Requires Go 1.21+. The build has no external dependencies and produces a
 single static binary:
 
 ```sh
-make build          # CGO_ENABLED=0 go build -o snsync ./cmd/snsync
-# or
+make build          # injects the version from git describe
+# or, without a version number (prints "dev"):
 CGO_ENABLED=0 go build -trimpath -o snsync ./cmd/snsync
 ```
+
+### Version
+
+The version is a single variable in `cmd/snsync/main.go`:
+
+```go
+var version = "dev"
+```
+
+`make build` overwrites it at link time from `git describe --tags --always
+--dirty`, so tagged releases report e.g. `v0.1.0` and untagged builds report
+the commit hash. Check it with `snsync version` or `snsync --version`.
 
 ## Usage
 

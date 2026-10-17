@@ -16,6 +16,10 @@ import (
 	syncpkg "github.com/dodorz/snsync/internal/sync"
 )
 
+// version is the program version. It defaults to "dev" and is overridden at
+// build time: -ldflags "-X main.version=$(git describe --tags --always)".
+var version = "dev"
+
 func main() {
 	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
@@ -36,6 +40,8 @@ func main() {
 		err = runSync(opts.configPath, opts.dryRun, opts.full)
 	case "status":
 		err = runStatus(opts.configPath)
+	case "version":
+		fmt.Printf("snsync %s\n", version)
 	case "help":
 		usage()
 	default:
@@ -85,6 +91,8 @@ func parseArgs(args []string) (*options, error) {
 			o.full = true
 		case a == "-h" || a == "--help":
 			o.command = "help"
+		case a == "-v" || a == "--version":
+			o.command = "version"
 		case strings.HasPrefix(a, "-"):
 			return nil, fmt.Errorf("unknown flag %q", a)
 		default:
@@ -291,6 +299,7 @@ commands:
   login     authenticate and cache an access token
   sync      run one reconciliation pass
   status    show sync state summary
+  version   print the program version
   help      show this message
 
 flags:
@@ -298,6 +307,7 @@ flags:
       --dry-run         show what would happen without writing anything
       --full            force a full reconciliation (ignore the cursor)
       --token <value>   save a token obtained elsewhere (login only)
+  -v, --version         print the program version
 `)
 }
 
