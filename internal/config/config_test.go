@@ -19,10 +19,16 @@ func TestExpandHome(t *testing.T) {
 		{"~/Notes", filepath.Join(home, "Notes")},
 		{`~\Notes`, filepath.Join(home, "Notes")},
 		{"~/a/b", filepath.Join(home, "a", "b")},
+		{"~/", home},
 		{"relative/path", "relative/path"},
 		{"", ""},
-		// A drive-letter path is not a home reference and must be untouched.
+		// "~" is a legal directory name on Windows, so only a leading "~" is
+		// a home reference. A drive-letter path, or a "~" further along, must
+		// be left untouched.
 		{"C:/Users/someone/Notes", "C:/Users/someone/Notes"},
+		{"C:/~/Temp", "C:/~/Temp"},
+		{`C:\~\Temp`, `C:\~\Temp`},
+		{"~foo/bar", "~foo/bar"},
 	}
 	for _, tc := range cases {
 		if got := expandHome(tc.in); got != tc.want {

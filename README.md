@@ -136,8 +136,11 @@ drive-letter colon is literal and needs no escaping:
 { "local_dir": "C:\\Users\\you\\Notes" }
 ```
 
-`~`, `~/Notes` and `~\Notes` all expand to `%USERPROFILE%`. The default config
-file is `%AppData%\snsync\config.json`.
+A `~` is expanded to `%USERPROFILE%` only when it is the first component of the
+path: `~`, `~/Notes` and `~\Notes` all expand. A `~` anywhere else is an
+ordinary directory name (legal on Windows), so `C:/~/Temp` refers to a folder
+literally named `~` and is used as-is. The default config file is
+`%AppData%\snsync\config.json`.
 
 After `login` an access token is cached in the same file. The password is never
 required again (and never stored unless you put it there). You can also supply

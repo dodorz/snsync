@@ -137,18 +137,29 @@ func (c *Config) Save() error {
 	return os.Rename(tmp, c.path)
 }
 
+// expandHome expands a leading "~" path component to the current user's home
+// directory.
+//
+// A "~" only refers to the home directory when it is the first component of the
+// path. This matters on Windows, where "~" is a legal directory name: a path
+// such as `C:/~/Temp` (or `C:\~\Temp`) must be left untouched because its "~"
+// is an ordinary directory, not a shortcut to %USERPROFILE%.
 func expandHome(p string) string {
-	if p == "~" {
-		if home, err := os.UserHomeDir(); err == nil {
-			return home
-		}
+	// A drive/volume prefix means the "~" can never be the leading component,
+	// so paths like `C:/~/Temp` are ordinary directories and stay as they are.
+	if filepath.VolumeName(p) != "" {
 		return p
 	}
-	// Accept both ~/ and ~\ so Windows users can write either separator.
-	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, p[2:])
-		}
+	if p != "~" && !strings.HasPrefix(p, "~/") && !strings.HasPrefix(p, `~\`) {
+		return p
 	}
-	return p
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return p
+	}
+	// Accept both separators so Windows users can write `~/Notes` or `~\Notes`.
+	if p == "~" {
+		return home
+	}
+	return filepath.Join(home, p[2:])
 }
