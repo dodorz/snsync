@@ -15,22 +15,22 @@ func TestParseArgs(t *testing.T) {
 		{
 			name: "sync with flags in any order",
 			args: []string{"sync", "--dry-run", "-c", "/tmp/x.json", "--full"},
-			want: options{command: "sync", configPath: "/tmp/x.json", dryRun: true, full: true, interval: 60 * time.Second},
+			want: options{command: "sync", configPath: "/tmp/x.json", dryRun: true, full: true},
 		},
 		{
 			name: "flags before command",
 			args: []string{"-c=/a", "watch", "--interval", "5m"},
-			want: options{command: "watch", configPath: "/a", interval: 5 * time.Minute},
+			want: options{command: "watch", configPath: "/a", interval: 5 * time.Minute, intervalSet: true},
 		},
 		{
 			name: "version flag",
 			args: []string{"--version"},
-			want: options{command: "version", configPath: defaultConfigPath(), interval: 60 * time.Second},
+			want: options{command: "version", configPath: defaultConfigPath()},
 		},
 		{
 			name: "login with token",
 			args: []string{"login", "--token", "abc"},
-			want: options{command: "login", configPath: defaultConfigPath(), token: "abc", interval: 60 * time.Second},
+			want: options{command: "login", configPath: defaultConfigPath(), token: "abc"},
 		},
 		{
 			name:    "bad interval",

@@ -269,8 +269,9 @@ func TestPullNewRemoteNote(t *testing.T) {
 	h.run(t)
 
 	got := h.read(t, "from the server.md")
-	if got != "from the server" {
-		t.Fatalf("unexpected file content: %q", got)
+	want := "---\r\ntags: [work]\r\n---\r\nfrom the server"
+	if got != want {
+		t.Fatalf("unexpected file content: %q, want %q", got, want)
 	}
 	st := h.st.Notes["abc"]
 	if st == nil || st.ServerKey != "abc" {

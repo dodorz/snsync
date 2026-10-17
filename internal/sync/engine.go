@@ -45,12 +45,12 @@ type work struct {
 	remote       *simperium.RemoteNote
 	remoteExists bool
 	// local state
-	localExists  bool
-	localContent string
-	localFront   string // front matter as found on disk
-	localTags    []string
-	localTagsSet bool // whether the front matter has an explicit "tags" key
-	localHash    string
+	localExists   bool
+	localContent  string
+	localFront    string // front matter as found on disk
+	localTags     []string
+	localTagsSet  bool // whether the front matter has an explicit "tags" key
+	localHash     string
 	localFilename string
 	// decision
 	finalContent    string
