@@ -36,8 +36,19 @@ var version = "dev"
 ```
 
 `make build` overwrites it at link time from `git describe --tags --always
---dirty`, so tagged releases report e.g. `v0.1.0` and untagged builds report
+--dirty`, so tagged releases report e.g. `0.1.0` and untagged builds report
 the commit hash. Check it with `snsync version` or `snsync --version`.
+
+### Releases
+
+Pushing a version tag (e.g. `0.1.1`) runs
+`.github/workflows/release.yml`: it lints/tests, cross-compiles static
+binaries for Linux, macOS and Windows (amd64 + arm64), writes a
+`checksums.txt`, and attaches everything to the GitHub Release for that tag.
+
+```sh
+git tag 0.1.2 && git push origin 0.1.2
+```
 
 ## Usage
 
