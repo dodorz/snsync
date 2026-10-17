@@ -69,6 +69,8 @@ jobs:
         with:
           path: dist
           merge-multiple: true
+      - name: Add docs to release
+        run: cp README.md LICENSE dist/
       - name: Checksums
         run: |
           cd dist
