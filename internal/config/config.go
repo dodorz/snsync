@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Public, community-maintained Simperium credentials for the Simplenote app.
@@ -17,6 +18,10 @@ const (
 	DefaultAppID  = "chalk-bump-f49"
 	DefaultAppKey = "26864ab5d6fd4a37b80343439f107350"
 )
+
+// DefaultWatchInterval is the poll interval used by `watch` when neither the
+// --interval flag nor the watch_interval config key is set.
+const DefaultWatchInterval = 60 * time.Second
 
 // Config is the on-disk configuration file (JSON).
 type Config struct {
@@ -38,6 +43,10 @@ type Config struct {
 	// FullSyncEvery forces a full reconciliation after this many incremental
 	// syncs (0 disables periodic full syncs). Defaults to 10.
 	FullSyncEvery int `json:"full_sync_every,omitempty"`
+
+	// WatchInterval is the default `watch` poll interval, written as a Go
+	// duration string such as "90s" or "5m". Empty means DefaultWatchInterval.
+	WatchInterval string `json:"watch_interval,omitempty"`
 
 	path string
 }
@@ -72,7 +81,7 @@ func (c *Config) applyDefaults() {
 		c.StateFile = filepath.Join(c.LocalDir, ".snsync", "state.json")
 	}
 	if c.LocalDir != "" && c.TrashDir == "" {
-		c.TrashDir = filepath.Join(c.LocalDir, ".snsync", "trash")
+		c.TrashDir = filepath.Join(c.LocalDir, ".trash")
 	}
 	if c.FullSyncEvery == 0 {
 		c.FullSyncEvery = 10
@@ -103,6 +112,22 @@ func (c *Config) applyEnv() {
 	}
 }
 
+// WatchEvery returns the configured `watch` poll interval, falling back to
+// DefaultWatchInterval when watch_interval is unset.
+func (c *Config) WatchEvery() (time.Duration, error) {
+	if c.WatchInterval == "" {
+		return DefaultWatchInterval, nil
+	}
+	d, err := time.ParseDuration(c.WatchInterval)
+	if err != nil {
+		return 0, fmt.Errorf("config: invalid watch_interval %q: %w", c.WatchInterval, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("config: watch_interval must be positive, got %q", c.WatchInterval)
+	}
+	return d, nil
+}
+
 // Validate checks the fields required to run.
 func (c *Config) Validate() error {
 	if c.Email == "" {
@@ -110,6 +135,9 @@ func (c *Config) Validate() error {
 	}
 	if c.LocalDir == "" {
 		return fmt.Errorf("config: local_dir is required")
+	}
+	if _, err := c.WatchEvery(); err != nil {
+		return err
 	}
 	return nil
 }

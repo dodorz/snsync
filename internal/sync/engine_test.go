@@ -136,7 +136,7 @@ func newHarness(t *testing.T) *harness {
 		Email:     "test@example.com",
 		LocalDir:  dir,
 		StateFile: filepath.Join(dir, ".snsync", "state.json"),
-		TrashDir:  filepath.Join(dir, ".snsync", "trash"),
+		TrashDir:  filepath.Join(dir, ".trash"),
 	}
 	st, err := store.LoadState(cfg.StateFile)
 	if err != nil {

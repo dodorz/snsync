@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestExpandHome(t *testing.T) {
@@ -37,13 +38,30 @@ func TestExpandHome(t *testing.T) {
 	}
 }
 
+func TestWatchEvery(t *testing.T) {
+	c := &Config{}
+	if got, err := c.WatchEvery(); err != nil || got != DefaultWatchInterval {
+		t.Errorf("default WatchEvery() = %v, %v; want %v, nil", got, err, DefaultWatchInterval)
+	}
+	c.WatchInterval = "90s"
+	if got, err := c.WatchEvery(); err != nil || got != 90*time.Second {
+		t.Errorf("WatchEvery(90s) = %v, %v; want 90s, nil", got, err)
+	}
+	for _, bad := range []string{"nope", "0s", "-5s"} {
+		c.WatchInterval = bad
+		if _, err := c.WatchEvery(); err == nil {
+			t.Errorf("WatchEvery(%q) = nil error, want failure", bad)
+		}
+	}
+}
+
 func TestApplyDefaultsFillsPaths(t *testing.T) {
 	c := &Config{LocalDir: "/tmp/notes"}
 	c.applyDefaults()
 	if c.StateFile != filepath.Join("/tmp/notes", ".snsync", "state.json") {
 		t.Errorf("StateFile = %q", c.StateFile)
 	}
-	if c.TrashDir != filepath.Join("/tmp/notes", ".snsync", "trash") {
+	if c.TrashDir != filepath.Join("/tmp/notes", ".trash") {
 		t.Errorf("TrashDir = %q", c.TrashDir)
 	}
 	if c.AppID != DefaultAppID || c.AppKey != DefaultAppKey {

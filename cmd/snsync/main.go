@@ -43,7 +43,7 @@ func main() {
 	case "sync":
 		err = runSync(opts.configPath, opts.dryRun, opts.full)
 	case "watch":
-		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.interval)
+		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.interval, opts.intervalSet)
 	case "status":
 		err = runStatus(opts.configPath)
 	case "version":
@@ -67,10 +67,13 @@ type options struct {
 	full       bool
 	token      string
 	interval   time.Duration
+	// intervalSet records whether --interval was given, so the config value can
+	// be used when it was not.
+	intervalSet bool
 }
 
 func parseArgs(args []string) (*options, error) {
-	o := &options{configPath: defaultConfigPath(), interval: 60 * time.Second}
+	o := &options{configPath: defaultConfigPath()}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -101,13 +104,13 @@ func parseArgs(args []string) (*options, error) {
 			if err != nil {
 				return nil, fmt.Errorf("invalid --interval: %w", err)
 			}
-			o.interval = d
+			o.interval, o.intervalSet = d, true
 		case strings.HasPrefix(a, "--interval="):
 			d, err := time.ParseDuration(strings.TrimPrefix(a, "--interval="))
 			if err != nil {
 				return nil, fmt.Errorf("invalid --interval: %w", err)
 			}
-			o.interval = d
+			o.interval, o.intervalSet = d, true
 		case a == "-dry-run" || a == "--dry-run":
 			o.dryRun = true
 		case a == "-full" || a == "--full":
@@ -127,7 +130,7 @@ func parseArgs(args []string) (*options, error) {
 	}
 	switch cmd := o.command; cmd {
 	case "watch":
-		if o.interval <= 0 {
+		if o.intervalSet && o.interval <= 0 {
 			return nil, fmt.Errorf("--interval must be positive")
 		}
 	}
@@ -265,10 +268,15 @@ func runSync(path string, dry, full bool) error {
 	return nil
 }
 
-func runWatch(path string, dry, full bool, interval time.Duration) error {
+func runWatch(path string, dry, full bool, interval time.Duration, intervalSet bool) error {
 	cfg, sn, st, err := load(path)
 	if err != nil {
 		return err
+	}
+	if !intervalSet {
+		if interval, err = cfg.WatchEvery(); err != nil {
+			return err
+		}
 	}
 	eng := syncpkg.New(cfg, sn, st)
 	eng.Log = func(format string, args ...any) {
@@ -374,7 +382,8 @@ flags:
   -c, --config <path>   config file (default ~/.config/snsync/config.json)
       --dry-run         show what would happen without writing anything
       --full            force a full reconciliation (ignore the cursor)
-      --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s)
+      --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s or
+                        the watch_interval config key)
       --token <value>   save a token obtained elsewhere (login only)
   -v, --version         print the program version
 `)

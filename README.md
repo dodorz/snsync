@@ -113,7 +113,8 @@ point elsewhere.
   "local_dir": "~/Notes",
   "app_id": "chalk-bump-f49",
   "app_key": "26864ab5d6fd4a37b80343439f107350",
-  "full_sync_every": 10
+  "full_sync_every": 10,
+  "watch_interval": "90s"
 }
 ```
 
@@ -123,9 +124,10 @@ All keys except `email` and `local_dir` are optional:
 |---|---|---|
 | `app_id`, `app_key` | the shared community credentials | Simperium app identity |
 | `full_sync_every` | `10` | force a full reconciliation after this many incremental syncs (`0` disables) |
+| `watch_interval` | `60s` | default `watch` poll interval, as a duration (`"90s"`, `"5m"`); `--interval` overrides it |
 | `auth_host`, `api_host` | `https://auth.simperium.com`, `https://api.simperium.com` | override the Simperium hosts, e.g. when one is blocked |
 | `state_file` | `<local_dir>/.snsync/state.json` | where sync bookkeeping lives |
-| `trash_dir` | `<local_dir>/.snsync/trash` | where locally deleted notes go |
+| `trash_dir` | `<local_dir>/.trash` | where locally deleted notes go |
 
 On Windows, JSON strings treat `\` as an escape character, so write paths with
 forward slashes (Go accepts them everywhere) or double every backslash. The
@@ -160,11 +162,11 @@ current server state, and the current local file.
 | changed | changed, different | **conflict**: pull remote, save local as `… (conflict).md` and push it as a new note |
 | deleted | unchanged | move remote note to the trash |
 | deleted | changed | restore the remote version |
-| unchanged | deleted | move the local file to `.snsync/trash/` |
+| unchanged | deleted | move the local file to `.trash/` |
 | changed | deleted | re-create it as a new note |
 
 Deletions travel in both directions. Nothing is ever hard-deleted: local files
-go to `.snsync/trash/`, remote notes get `deleted: true` (Simplenote's own
+go to `.trash/`, remote notes get `deleted: true` (Simplenote's own
 trash).
 
 ### Incremental sync
@@ -182,8 +184,8 @@ body is preserved.
 
 ### Watch mode
 
-`snsync watch` runs a sync, waits `--interval` (default 60s), then repeats
-until interrupted with Ctrl-C. The first pass is a full reconciliation (or
+`snsync watch` runs a sync, waits `--interval` (or the `watch_interval` config
+key, default 60s), then repeats until interrupted with Ctrl-C. The first pass is a full reconciliation (or
 forced full with `--full`); later passes use the incremental cursor and the
 periodic full-sync counter. Transient errors (network) are logged and retried
 on the next tick; an authentication error stops the loop.
@@ -198,7 +200,7 @@ on the next tick; an authentication error stops the loop.
 - Tags and the pinned/markdown system tags are **not** stored in the file, so
   local files stay pure note content. They live in the state file.
 - Bookkeeping is kept in `<local_dir>/.snsync/state.json`; the trash is
-  `<local_dir>/.snsync/trash/`.
+  `<local_dir>/.trash/`.
 
 ## When the auth host is unreachable (e.g. blocked networks)
 
