@@ -127,6 +127,18 @@ All keys except `email` and `local_dir` are optional:
 | `state_file` | `<local_dir>/.snsync/state.json` | where sync bookkeeping lives |
 | `trash_dir` | `<local_dir>/.snsync/trash` | where locally deleted notes go |
 
+On Windows, JSON strings treat `\` as an escape character, so write paths with
+forward slashes (Go accepts them everywhere) or double every backslash. The
+drive-letter colon is literal and needs no escaping:
+
+```json
+{ "local_dir": "C:/Users/you/Notes" }
+{ "local_dir": "C:\\Users\\you\\Notes" }
+```
+
+`~`, `~/Notes` and `~\Notes` all expand to `%USERPROFILE%`. The default config
+file is `%AppData%\snsync\config.json`.
+
 After `login` an access token is cached in the same file. The password is never
 required again (and never stored unless you put it there). You can also supply
 `SN_EMAIL`, `SN_PASSWORD` and `SN_TOKEN` via the environment.

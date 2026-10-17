@@ -138,9 +138,16 @@ func (c *Config) Save() error {
 }
 
 func expandHome(p string) string {
-	if p == "~" || strings.HasPrefix(p, "~/") {
+	if p == "~" {
 		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, strings.TrimPrefix(p, "~/"))
+			return home
+		}
+		return p
+	}
+	// Accept both ~/ and ~\ so Windows users can write either separator.
+	if strings.HasPrefix(p, "~/") || strings.HasPrefix(p, `~\`) {
+		if home, err := os.UserHomeDir(); err == nil {
+			return filepath.Join(home, p[2:])
 		}
 	}
 	return p
