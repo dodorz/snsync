@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,15 +44,32 @@ func TestWatchEvery(t *testing.T) {
 	if got, err := c.WatchEvery(); err != nil || got != DefaultWatchInterval {
 		t.Errorf("default WatchEvery() = %v, %v; want %v, nil", got, err, DefaultWatchInterval)
 	}
-	c.WatchInterval = "90s"
+	c.WatchInterval = Interval(90 * time.Second)
 	if got, err := c.WatchEvery(); err != nil || got != 90*time.Second {
 		t.Errorf("WatchEvery(90s) = %v, %v; want 90s, nil", got, err)
 	}
-	for _, bad := range []string{"nope", "0s", "-5s"} {
-		c.WatchInterval = bad
-		if _, err := c.WatchEvery(); err == nil {
-			t.Errorf("WatchEvery(%q) = nil error, want failure", bad)
-		}
+	c.WatchInterval = Interval(-5 * time.Second)
+	if _, err := c.WatchEvery(); err == nil {
+		t.Errorf("WatchEvery(-5s) = nil error, want failure")
+	}
+}
+
+func TestWatchIntervalJSON(t *testing.T) {
+	var c Config
+	if err := json.Unmarshal([]byte(`{"watch_interval":"90s"}`), &c); err != nil {
+		t.Fatalf("string duration: %v", err)
+	}
+	if got, _ := c.WatchEvery(); got != 90*time.Second {
+		t.Errorf("string watch_interval = %v, want 90s", got)
+	}
+	if err := json.Unmarshal([]byte(`{"watch_interval":300}`), &c); err != nil {
+		t.Fatalf("numeric duration: %v", err)
+	}
+	if got, _ := c.WatchEvery(); got != 300*time.Second {
+		t.Errorf("numeric watch_interval = %v, want 300s", got)
+	}
+	if err := json.Unmarshal([]byte(`{"watch_interval":"nope"}`), &c); err == nil {
+		t.Errorf("bad duration = nil error, want failure")
 	}
 }
 

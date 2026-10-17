@@ -23,6 +23,42 @@ const (
 // --interval flag nor the watch_interval config key is set.
 const DefaultWatchInterval = 60 * time.Second
 
+// Interval is a duration that accepts either a Go duration string ("90s",
+// "5m") or a plain number of seconds in JSON. It marshals back as a string.
+type Interval time.Duration
+
+// UnmarshalJSON accepts both "90s" and 90 (seconds).
+func (iv *Interval) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	if s == "" || s == "null" {
+		*iv = 0
+		return nil
+	}
+	if s[0] == '"' {
+		var str string
+		if err := json.Unmarshal(b, &str); err != nil {
+			return err
+		}
+		d, err := time.ParseDuration(str)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", str, err)
+		}
+		*iv = Interval(d)
+		return nil
+	}
+	var seconds float64
+	if err := json.Unmarshal(b, &seconds); err != nil {
+		return fmt.Errorf("duration must be a string like \"90s\" or a number of seconds: %w", err)
+	}
+	*iv = Interval(time.Duration(seconds * float64(time.Second)))
+	return nil
+}
+
+// MarshalJSON writes the interval back as a Go duration string.
+func (iv Interval) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Duration(iv).String())
+}
+
 // Config is the on-disk configuration file (JSON).
 type Config struct {
 	Email    string `json:"email"`
@@ -44,9 +80,9 @@ type Config struct {
 	// syncs (0 disables periodic full syncs). Defaults to 10.
 	FullSyncEvery int `json:"full_sync_every,omitempty"`
 
-	// WatchInterval is the default `watch` poll interval, written as a Go
-	// duration string such as "90s" or "5m". Empty means DefaultWatchInterval.
-	WatchInterval string `json:"watch_interval,omitempty"`
+	// WatchInterval is the default `watch` poll interval. It accepts a Go
+	// duration string such as "90s" or "5m", or a number of seconds.
+	WatchInterval Interval `json:"watch_interval,omitempty"`
 
 	path string
 }
@@ -115,15 +151,12 @@ func (c *Config) applyEnv() {
 // WatchEvery returns the configured `watch` poll interval, falling back to
 // DefaultWatchInterval when watch_interval is unset.
 func (c *Config) WatchEvery() (time.Duration, error) {
-	if c.WatchInterval == "" {
+	d := time.Duration(c.WatchInterval)
+	if d == 0 {
 		return DefaultWatchInterval, nil
 	}
-	d, err := time.ParseDuration(c.WatchInterval)
-	if err != nil {
-		return 0, fmt.Errorf("config: invalid watch_interval %q: %w", c.WatchInterval, err)
-	}
-	if d <= 0 {
-		return 0, fmt.Errorf("config: watch_interval must be positive, got %q", c.WatchInterval)
+	if d < 0 {
+		return 0, fmt.Errorf("config: watch_interval must be positive, got %s", d)
 	}
 	return d, nil
 }

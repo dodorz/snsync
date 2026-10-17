@@ -126,7 +126,7 @@ All keys except `email` and `local_dir` are optional:
 |---|---|---|
 | `app_id`, `app_key` | the shared community credentials | Simperium app identity |
 | `full_sync_every` | `10` | force a full reconciliation after this many incremental syncs (`0` disables) |
-| `watch_interval` | `60s` | default `watch` poll interval, as a duration (`"90s"`, `"5m"`); `--interval` overrides it |
+| `watch_interval` | `60s` | default `watch` poll interval, as a duration (`"90s"`, `"5m"`) or a number of seconds (`300`); `--interval` overrides it |
 | `auth_host`, `api_host` | `https://auth.simperium.com`, `https://api.simperium.com` | override the Simperium hosts, e.g. when one is blocked |
 | `state_file` | `<local_dir>/.snsync/state.json` | where sync bookkeeping lives |
 | `trash_dir` | `<local_dir>/.trash` | where locally deleted notes go |
