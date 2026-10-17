@@ -456,3 +456,96 @@ func TestPeriodicFullSync(t *testing.T) {
 		t.Fatalf("periodic full sync did not reset the counter: %d", h.st.IncrementalSinceFull)
 	}
 }
+
+func TestFrontMatterIsLocalOnly(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "note.md", "---\ntitle: local\n---\nbody text")
+	h.run(t)
+
+	id, n := h.noteByContent("body text")
+	if id == "" {
+		t.Fatal("note body was not pushed")
+	}
+	if strings.Contains(n.Content, "title: local") {
+		t.Fatalf("front matter leaked to the server: %q", n.Content)
+	}
+	if n.Content != "body text" {
+		t.Fatalf("server content = %q, want the body only", n.Content)
+	}
+
+	// The file is renamed after its (body) title, keeps the front matter and
+	// uses CRLF line endings.
+	got := h.read(t, "body text.md")
+	if !strings.Contains(got, "title: local") {
+		t.Fatalf("front matter was dropped locally: %q", got)
+	}
+	if !strings.HasPrefix(got, "---\r\n") || !strings.Contains(got, "\r\nbody text") {
+		t.Fatalf("file is not CRLF: %q", got)
+	}
+	if strings.Contains(strings.ReplaceAll(got, "\r\n", ""), "\n") {
+		t.Fatalf("file contains a bare LF: %q", got)
+	}
+
+	// Editing only the front matter does not change the note, so nothing is
+	// pushed and the second sync is otherwise a no-op.
+	h.write(t, "body text.md", "---\ntitle: edited\n---\nbody text")
+	h.run(t)
+	if h.srv.pushes != 1 {
+		t.Fatalf("front matter edit triggered a push: %d pushes", h.srv.pushes)
+	}
+	if got := h.read(t, "body text.md"); !strings.Contains(got, "title: edited") {
+		t.Fatalf("edited front matter was not kept: %q", got)
+	}
+}
+
+func TestPullPreservesFrontMatter(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "old body"})
+	h.run(t)
+
+	st := h.stateByServerKey("a")
+	if st == nil {
+		t.Fatal("pull failed")
+	}
+	// Attach front matter locally, then let the server change the body.
+	h.write(t, st.Filename, "---\nsite: docs\n---\nold body")
+	h.srv.put("a", simperium.Note{Content: "new body"})
+	h.run(t)
+
+	got := h.read(t, "new body.md")
+	if !strings.Contains(got, "site: docs") {
+		t.Fatalf("front matter lost on pull: %q", got)
+	}
+	if !strings.Contains(got, "\r\nnew body") {
+		t.Fatalf("pulled file is not CRLF: %q", got)
+	}
+	if _, n := h.noteByContent("new body"); strings.Contains(n.Content, "site: docs") {
+		t.Fatalf("front matter leaked to the server: %q", n.Content)
+	}
+}
+
+func TestTagsLiveInFrontMatter(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"work"}})
+	h.run(t)
+
+	// Server tags are written into the file's front matter.
+	got := h.read(t, "tagged note.md")
+	if !strings.Contains(got, "tags: [work]") {
+		t.Fatalf("tags not written to front matter: %q", got)
+	}
+
+	// Editing the tags in the file pushes the new set to the server.
+	h.write(t, "tagged note.md", "---\ntags: [home, work]\n---\ntagged note")
+	h.run(t)
+	if _, n := h.noteByContent("tagged note"); !equalStrings(n.Tags, []string{"home", "work"}) {
+		t.Fatalf("local tag edit not pushed: %v", n.Tags)
+	}
+
+	// A remote tag change is written back into the file.
+	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"remote"}})
+	h.run(t)
+	if got := h.read(t, "tagged note.md"); !strings.Contains(got, "tags: [remote]") {
+		t.Fatalf("remote tags not written to front matter: %q", got)
+	}
+}

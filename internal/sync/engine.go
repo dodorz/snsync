@@ -45,9 +45,12 @@ type work struct {
 	remote       *simperium.RemoteNote
 	remoteExists bool
 	// local state
-	localExists   bool
-	localContent  string
-	localHash     string
+	localExists  bool
+	localContent string
+	localFront   string // front matter as found on disk
+	localTags    []string
+	localTagsSet bool // whether the front matter has an explicit "tags" key
+	localHash    string
 	localFilename string
 	// decision
 	finalContent    string
@@ -184,13 +187,18 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			continue
 		}
 		p := filepath.Join(e.cfg.LocalDir, w.st.Filename)
-		content, err := store.ReadFile(p)
+		full, err := store.ReadFile(p)
 		if err != nil {
 			continue // missing or unreadable: treated as a local deletion
 		}
+		front, body := store.SplitFrontMatter(full)
+		tags, tagsSet := store.FrontMatterTags(front)
 		w.localExists = true
-		w.localContent = content
-		w.localHash = store.HashContent(content)
+		w.localFront = front
+		w.localTags = tags
+		w.localTagsSet = tagsSet
+		w.localContent = body
+		w.localHash = store.HashContent(body)
 		w.localFilename = w.st.Filename
 	}
 
@@ -213,15 +221,20 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			continue
 		}
 		p := filepath.Join(e.cfg.LocalDir, name)
-		content, err := store.ReadFile(p)
+		full, err := store.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		h := store.HashContent(content)
+		front, body := store.SplitFrontMatter(full)
+		tags, tagsSet := store.FrontMatterTags(front)
+		h := store.HashContent(body)
 		if w, ok := missingByHash[h]; ok {
 			// Same content, new name: a manual rename. Adopt it.
 			w.localExists = true
-			w.localContent = content
+			w.localFront = front
+			w.localTags = tags
+			w.localTagsSet = tagsSet
+			w.localContent = body
 			w.localHash = h
 			w.localFilename = name
 			claimed[name] = true
@@ -233,7 +246,10 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			id:            id,
 			st:            &store.NoteState{ID: id},
 			localExists:   true,
-			localContent:  content,
+			localFront:    front,
+			localTags:     tags,
+			localTagsSet:  tagsSet,
+			localContent:  body,
 			localHash:     h,
 			localFilename: name,
 		}
@@ -295,13 +311,14 @@ func (e *Engine) decide(w *work) {
 			return
 		}
 		w.finalContent = w.localContent
-		w.finalTags = w.st.Tags
+		w.finalTags = w.tags()
 		w.finalSystemTags = w.st.SystemTags
 		w.createRemote = true
 		return
 	}
 
-	localChanged := w.localExists && w.localHash != baseHash
+	localContentChanged := w.localExists && w.localHash != baseHash
+	localChanged := localContentChanged || w.tagsChanged()
 	localDeleted := !w.localExists
 	remoteContentChanged := w.remoteExists && !remoteDeleted && remoteHash != baseHash
 	remoteMetaChanged := w.remoteExists &&
@@ -322,9 +339,25 @@ func (e *Engine) decide(w *work) {
 		case !localDeleted && localChanged && !remoteChanged:
 			w.pushLocal()
 		case !localDeleted && localChanged && remoteChanged:
-			if w.localHash == remoteHash {
+			switch {
+			case w.localHash == remoteHash:
 				w.pull()
-			} else {
+			case !localContentChanged:
+				// Only the local tags changed; keep the remote content and
+				// merge the tags before pushing them back.
+				w.finalContent = w.remote.Note.Content
+				w.finalTags = mergeTags(w.tags(), w.remote.Note.Tags)
+				w.finalSystemTags = w.remote.Note.SystemTags
+				w.writeLocal = true
+				w.updateRemote = true
+			case !remoteContentChanged:
+				// The remote only changed metadata; keep the local content and
+				// merge the tags before pushing them back.
+				w.finalContent = w.localContent
+				w.finalTags = mergeTags(w.tags(), w.remote.Note.Tags)
+				w.finalSystemTags = w.remote.Note.SystemTags
+				w.updateRemote = true
+			default:
 				w.isConflict = true
 				w.pull()
 			}
@@ -349,7 +382,7 @@ func (e *Engine) decide(w *work) {
 		case !localDeleted && localChanged:
 			// Edited locally after remote deletion: keep it as a new note.
 			w.finalContent = w.localContent
-			w.finalTags = w.st.Tags
+			w.finalTags = w.tags()
 			w.finalSystemTags = w.st.SystemTags
 			w.createRemote = true
 		default:
@@ -363,7 +396,7 @@ func (e *Engine) decide(w *work) {
 				w.finalDeleted = true
 			case localChanged:
 				w.finalContent = w.localContent
-				w.finalTags = w.st.Tags
+				w.finalTags = w.tags()
 				w.finalSystemTags = w.st.SystemTags
 				w.createRemote = true
 			default:
@@ -374,7 +407,7 @@ func (e *Engine) decide(w *work) {
 			w.finalDeleted = true
 		} else {
 			w.finalContent = w.localContent
-			w.finalTags = w.st.Tags
+			w.finalTags = w.tags()
 			w.finalSystemTags = w.st.SystemTags
 			w.createRemote = true
 		}
@@ -393,9 +426,41 @@ func (w *work) pull() {
 
 func (w *work) pushLocal() {
 	w.finalContent = w.localContent
-	w.finalTags = w.st.Tags
+	w.finalTags = w.tags()
 	w.finalSystemTags = w.st.SystemTags
 	w.updateRemote = true
+}
+
+// tags returns the local tags when the file declares them, otherwise the tags
+// remembered in the state. Legacy files without a "tags" key therefore keep the
+// server tags instead of being read as "no tags".
+func (w *work) tags() []string {
+	if w.localTagsSet {
+		return w.localTags
+	}
+	if w.st != nil {
+		return w.st.Tags
+	}
+	return nil
+}
+
+// tagsChanged reports whether the file's tags differ from the last synced tags.
+func (w *work) tagsChanged() bool {
+	return w.localExists && w.localTagsSet && w.st != nil && !equalStrings(w.localTags, w.st.Tags)
+}
+
+// mergeTags returns the union of a and b, keeping the order of a first.
+func mergeTags(a, b []string) []string {
+	out := make([]string, 0, len(a)+len(b))
+	seen := map[string]bool{}
+	for _, t := range append(append([]string(nil), a...), b...) {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
+	return out
 }
 
 // decideLocalOnly reconciles a tracked note whose server state was not part of
@@ -405,15 +470,15 @@ func (w *work) decideLocalOnly() {
 	case w.localExists && w.st.Deleted:
 		// Remote is still trashed but a local file exists again: re-create it.
 		w.finalContent = w.localContent
-		w.finalTags = w.st.Tags
+		w.finalTags = w.tags()
 		w.finalSystemTags = w.st.SystemTags
 		w.createRemote = true
-	case w.localExists && w.localHash != w.st.BaseHash:
+	case w.localExists && (w.localHash != w.st.BaseHash || w.tagsChanged()):
 		w.pushLocal()
 	case w.localExists:
 		// Unchanged; keep the file and the recorded base hash.
 		w.finalContent = w.localContent
-		w.finalTags = w.st.Tags
+		w.finalTags = w.tags()
 		w.finalSystemTags = w.st.SystemTags
 		w.preserveBase = true
 	default:
@@ -442,10 +507,13 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 		cw := &work{
 			id:              id,
 			st:              &store.NoteState{ID: id},
+			localFront:      w.localFront,
+			localTags:       w.localTags,
+			localTagsSet:    w.localTagsSet,
 			localContent:    w.localContent,
 			localHash:       w.localHash,
 			finalContent:    w.localContent,
-			finalTags:       w.st.Tags,
+			finalTags:       w.tags(),
 			finalSystemTags: w.st.SystemTags,
 			conflictCopy:    true,
 			createRemote:    true,
@@ -516,11 +584,14 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		}
 
 		target := filepath.Join(e.cfg.LocalDir, w.finalFilename)
+		// Front matter is preserved, but its tags field mirrors the synced
+		// tags, and line endings are forced to CRLF.
+		front := store.SetFrontMatterTags(w.localFront, w.finalTags)
 		if oldPath != "" && oldPath != target && store.Exists(oldPath) {
 			e.Log("rename %s -> %s", w.localFilename, w.finalFilename)
 			if !dryRun {
 				if err := os.Rename(oldPath, target); err != nil {
-					if err := store.WriteFileAtomic(target, w.finalContent); err != nil {
+					if err := store.WriteNoteAtomic(target, front, w.finalContent); err != nil {
 						return err
 					}
 					_ = os.Remove(oldPath)
@@ -528,18 +599,16 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 			}
 		}
 
-		needWrite := !store.Exists(target)
-		if !needWrite {
-			if c, err := store.ReadFile(target); err == nil {
-				needWrite = store.HashContent(c) != store.HashContent(w.finalContent)
-			}
+		// Only rewrite when the bytes on disk already differ, so repeated syncs
+		// are idempotent.
+		desired := store.EncodeNote(front, w.finalContent)
+		if b, err := os.ReadFile(target); err == nil && string(b) == desired {
+			continue
 		}
-		if needWrite {
-			e.Log("write  %s", w.finalFilename)
-			if !dryRun {
-				if err := store.WriteFileAtomic(target, w.finalContent); err != nil {
-					return err
-				}
+		e.Log("write  %s", w.finalFilename)
+		if !dryRun {
+			if err := store.WriteNoteAtomic(target, front, w.finalContent); err != nil {
+				return err
 			}
 		}
 	}

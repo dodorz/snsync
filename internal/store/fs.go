@@ -4,6 +4,7 @@ package store
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,9 +12,9 @@ import (
 	"strings"
 )
 
-// Normalize converts file/server content to a canonical form: it strips a
-// UTF-8 BOM and normalizes line endings to LF. Nothing else is changed, so the
-// bytes in the local file stay faithful to what is stored on the server.
+// Normalize converts file/server content to a canonical form for comparison: it
+// strips a UTF-8 BOM and normalizes line endings to LF. Front matter is handled
+// separately by SplitFrontMatter.
 func Normalize(s string) string {
 	s = strings.TrimPrefix(s, "\ufeff")
 	s = strings.ReplaceAll(s, "\r\n", "\n")
@@ -36,8 +37,193 @@ func ReadFile(path string) (string, error) {
 	return Normalize(string(b)), nil
 }
 
-// WriteFileAtomic writes content to path via a temp file + rename.
-func WriteFileAtomic(path, content string) error {
+// SplitFrontMatter separates an optional front matter block from the note body.
+//
+// Front matter is a block at the very top of the file whose first line is
+// "---" (YAML) or "+++" (TOML) and which is closed by the same marker (or by
+// "..." for YAML). It is kept on disk and, apart from its "tags" field, is
+// never synced. The returned strings are LF-normalized. When no complete block
+// is present, front is empty and body is the whole input.
+func SplitFrontMatter(s string) (front, body string) {
+	s = Normalize(s)
+	if !strings.HasPrefix(s, "---\n") && !strings.HasPrefix(s, "+++\n") {
+		return "", s
+	}
+	open := s[:3]
+	lines := strings.SplitAfter(s, "\n")
+	for i := 1; i < len(lines); i++ {
+		line := strings.TrimRight(lines[i], "\r\n")
+		if line == open || (open == "---" && line == "...") {
+			return strings.Join(lines[:i+1], ""), strings.Join(lines[i+1:], "")
+		}
+	}
+	return "", s
+}
+
+// FrontMatterTags returns the tags declared by a YAML front matter block and
+// whether a "tags" key was present. Both inline lists ("tags: [a, b]") and
+// block sequences ("tags:\n  - a") are understood. TOML ("+++") front matter
+// is left alone: tags are only read from YAML blocks.
+func FrontMatterTags(front string) ([]string, bool) {
+	if !strings.HasPrefix(front, "---") {
+		return nil, false
+	}
+	inner := frontMatterInner(front)
+	for i := 0; i < len(inner); i++ {
+		if !strings.HasPrefix(inner[i], "tags:") {
+			continue
+		}
+		rest := strings.TrimSpace(inner[i][len("tags:"):])
+		if rest == "" {
+			var tags []string
+			for j := i + 1; j < len(inner); j++ {
+				item := strings.TrimSpace(inner[j])
+				if !strings.HasPrefix(item, "-") {
+					break
+				}
+				if item = strings.TrimSpace(item[1:]); item != "" {
+					tags = append(tags, unquoteTag(item))
+				}
+			}
+			return tags, true
+		}
+		rest = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(rest, "["), "]"))
+		var tags []string
+		for _, part := range splitInlineTags(rest) {
+			tags = append(tags, unquoteTag(part))
+		}
+		return tags, true
+	}
+	return nil, false
+}
+
+// SetFrontMatterTags returns front matter with its "tags" key replaced by tags.
+// The key is dropped when tags is empty, and the whole block is dropped when it
+// would be left empty. TOML blocks are returned unchanged. The result uses LF
+// line endings; EncodeNote turns them into CRLF when writing.
+func SetFrontMatterTags(front string, tags []string) string {
+	if strings.HasPrefix(front, "+++") {
+		return front
+	}
+	inner := frontMatterInner(front)
+	out := make([]string, 0, len(inner)+1)
+	skipping := false
+	for _, line := range inner {
+		if skipping {
+			trimmed := strings.TrimSpace(line)
+			if line != trimmed || strings.HasPrefix(trimmed, "-") {
+				continue // still part of the old tags value
+			}
+			skipping = false
+		}
+		if strings.HasPrefix(line, "tags:") {
+			skipping = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(tags) > 0 {
+		out = append(out, "tags: "+formatTags(tags))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "---\n" + strings.Join(out, "\n") + "\n---\n"
+}
+
+// frontMatterInner returns the lines between the delimiters of front matter.
+func frontMatterInner(front string) []string {
+	if front == "" {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSuffix(front, "\n"), "\n")
+	if len(lines) < 2 {
+		return nil
+	}
+	return lines[1 : len(lines)-1]
+}
+
+// splitInlineTags splits a YAML flow list such as `a, "b, c"` on commas that
+// are not inside single or double quotes. Empty items are dropped.
+func splitInlineTags(s string) []string {
+	var out []string
+	var cur strings.Builder
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			cur.WriteByte(c)
+			if quote == '"' && c == '\\' && i+1 < len(s) {
+				i++
+				cur.WriteByte(s[i])
+			} else if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+			cur.WriteByte(c)
+		case ',':
+			if part := strings.TrimSpace(cur.String()); part != "" {
+				out = append(out, part)
+			}
+			cur.Reset()
+		default:
+			cur.WriteByte(c)
+		}
+	}
+	if part := strings.TrimSpace(cur.String()); part != "" {
+		out = append(out, part)
+	}
+	return out
+}
+
+func formatTags(tags []string) string {
+	parts := make([]string, len(tags))
+	for i, t := range tags {
+		parts[i] = quoteTag(t)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func quoteTag(s string) string {
+	if s == "" || strings.TrimSpace(s) != s || strings.ContainsAny(s, ",[]{}#:\"'\\") {
+		b, _ := json.Marshal(s)
+		return string(b)
+	}
+	return s
+}
+
+func unquoteTag(s string) string {
+	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+		var out string
+		if err := json.Unmarshal([]byte(s), &out); err == nil {
+			return out
+		}
+	} else if len(s) >= 2 && s[0] == '\'' && s[len(s)-1] == '\'' {
+		return s[1 : len(s)-1]
+	}
+	return s
+}
+
+// EncodeNote renders a note for its local markdown file: any front matter is
+// kept as-is and every line ending is written as CRLF.
+func EncodeNote(front, body string) string {
+	s := strings.ReplaceAll(front+body, "\r\n", "\n")
+	s = strings.ReplaceAll(s, "\r", "\n")
+	return strings.ReplaceAll(s, "\n", "\r\n")
+}
+
+// WriteNoteAtomic writes a markdown note (front matter plus body) to path via a
+// temp file + rename, using CRLF line endings.
+func WriteNoteAtomic(path, front, body string) error {
+	return writeAtomic(path, EncodeNote(front, body))
+}
+
+// writeAtomic writes content to path via a temp file + rename.
+func writeAtomic(path, content string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

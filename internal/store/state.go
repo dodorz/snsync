@@ -8,8 +8,8 @@ import (
 
 // NoteState is the per-note sync bookkeeping. ID is a stable local identifier
 // (the server key once known, otherwise a generated local id). ServerKey is
-// empty until the note has been pushed. Tags and SystemTags live here rather
-// than in the file so that the local file stays pure note content.
+// empty until the note has been pushed. Tags are mirrored into the file's front
+// matter and kept here as the last-synced baseline; SystemTags live only here.
 type NoteState struct {
 	ID         string   `json:"id"`
 	ServerKey  string   `json:"server_key,omitempty"`
