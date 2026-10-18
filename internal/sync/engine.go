@@ -216,6 +216,22 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			missingByHash[w.st.BaseHash] = w
 		}
 	}
+	// Remote notes that no state entry claims. If state was lost (crash,
+	// interrupted run, deleted state file) these notes look brand new even
+	// though a local file with the same content may already exist. Match them
+	// by content so a lost state file cannot cause an endless stream of
+	// duplicate notes.
+	unclaimedRemoteByHash := map[string][]string{}
+	for id, r := range remoteByID {
+		if r.Note.Deleted {
+			continue
+		}
+		h := store.HashContent(r.Note.Content)
+		unclaimedRemoteByHash[h] = append(unclaimedRemoteByHash[h], id)
+	}
+	for h := range unclaimedRemoteByHash {
+		sort.Strings(unclaimedRemoteByHash[h])
+	}
 	for _, name := range files {
 		if claimed[name] {
 			continue
@@ -239,6 +255,35 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			w.localFilename = name
 			claimed[name] = true
 			delete(missingByHash, h)
+			continue
+		}
+		if ids := unclaimedRemoteByHash[h]; len(ids) > 0 {
+			// Same content on both sides but no state entry: adopt the pair
+			// instead of pushing a duplicate and pulling another copy.
+			remoteID := ids[0]
+			unclaimedRemoteByHash[h] = ids[1:]
+			r := remoteByID[remoteID]
+			delete(remoteByID, remoteID)
+			rr := r
+			works[remoteID] = &work{
+				id: remoteID,
+				// Base the state on the remote metadata; any local tag
+				// differences are merged and pushed normally.
+				st: &store.NoteState{
+					ID: remoteID, ServerKey: remoteID, BaseHash: h,
+					Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
+				},
+				remote:        &rr,
+				remoteExists:  true,
+				localExists:   true,
+				localFront:    front,
+				localTags:     tags,
+				localTagsSet:  tagsSet,
+				localContent:  body,
+				localHash:     h,
+				localFilename: name,
+			}
+			claimed[name] = true
 			continue
 		}
 		id := "local:" + localHex(8)
@@ -663,6 +708,7 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			}
 			w.st.ServerKey = key
 			w.st.Version = 0
+			e.recordProgress(w)
 		} else {
 			e.Log("push   %s (update)", w.displayName())
 			if dryRun {
@@ -671,9 +717,35 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			if _, _, err := e.sn.Save(w.st.ServerKey, note); err != nil {
 				return err
 			}
+			e.recordProgress(w)
 		}
 	}
 	return nil
+}
+
+// recordProgress updates the in-memory state after a successful remote write.
+// If a later step fails (or the process is interrupted), a subsequent run sees
+// the note as tracked instead of treating it as brand new and pushing a
+// duplicate. The cursor is only advanced once the whole pass has completed.
+func (e *Engine) recordProgress(w *work) {
+	if w.st == nil {
+		w.st = &store.NoteState{ID: w.id}
+	}
+	if w.st.ID == "" {
+		w.st.ID = w.id
+	}
+	w.st.BaseHash = store.HashContent(w.finalContent)
+	w.st.Tags = w.finalTags
+	w.st.SystemTags = w.finalSystemTags
+	w.st.Deleted = w.finalDeleted
+	if w.finalFilename != "" {
+		w.st.Filename = w.finalFilename
+	}
+	w.st.ModTime = float64(time.Now().Unix())
+	if e.st.Notes == nil {
+		e.st.Notes = map[string]*store.NoteState{}
+	}
+	e.st.Notes[w.id] = w.st
 }
 
 func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor string) {

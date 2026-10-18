@@ -2,6 +2,9 @@ package simperium
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -65,5 +68,29 @@ func TestNoteMarshalStaysBoolean(t *testing.T) {
 	}
 	if m["deleted"] != true {
 		t.Fatalf("deleted should marshal as a JSON boolean, got %T %v", m["deleted"], m["deleted"])
+	}
+}
+
+func TestIndexRejectsRepeatedPaginationMark(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/note/index") {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"current": "1",
+			"mark":    "stuck",
+			"count":   0,
+			"index":   []any{},
+		})
+	}))
+	defer srv.Close()
+
+	c := New("app", "key", "tok")
+	c.APIHost = srv.URL
+
+	if _, _, err := c.Index(""); err == nil || !strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("expected a repeated-mark error, got %v", err)
 	}
 }

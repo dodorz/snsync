@@ -1,8 +1,14 @@
 package main
 
 import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
+
+	"github.com/dodorz/snsync/internal/lock"
 )
 
 func TestParseArgs(t *testing.T) {
@@ -69,5 +75,25 @@ func TestParseArgs(t *testing.T) {
 				t.Fatalf("got %+v want %+v", *got, tc.want)
 			}
 		})
+	}
+}
+
+func TestRunSyncSkipsWhenLocked(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.json")
+	body := `{"email":"test@example.com","local_dir":` + strconv.Quote(dir) + `}`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Hold the same lock a running sync would hold.
+	lk, err := lock.Acquire(filepath.Join(dir, ".snsync", "state.json.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lk.Release()
+
+	if err := runSync(cfgPath, false, false); !errors.Is(err, lock.ErrHeld) {
+		t.Fatalf("runSync: got %v, want ErrHeld", err)
 	}
 }

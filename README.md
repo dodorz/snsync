@@ -184,13 +184,29 @@ unchanged rather than missing, so nothing is deleted locally by omission. If a
 local file was removed, the note is fetched once before being trashed so its
 body is preserved.
 
-### Watch mode
+If the state file is lost (for example because a run was killed before it could
+save), the next full sync matches untracked local files to untracked remote
+notes by content. The existing note is adopted instead of being pushed again,
+so a lost state file cannot turn into an endless stream of duplicate notes.
+
+### Watch mode and cron
 
 `snsync watch` runs a sync, waits `--interval` (or the `watch_interval` config
 key, default 60s), then repeats until interrupted with Ctrl-C. The first pass is a full reconciliation (or
 forced full with `--full`); later passes use the incremental cursor and the
 periodic full-sync counter. Transient errors (network) are logged and retried
 on the next tick; an authentication error stops the loop.
+
+Every `sync` and `watch` run takes an exclusive lock on the state file
+(`<local_dir>/.snsync/state.json.lock`). A second invocation that starts while
+the first is still running — the usual case when a cron job fires every 10
+minutes but a large sync takes longer — prints `another sync is already
+running; skipping`, exits successfully, and lets the next tick catch up. This
+prevents two processes from racing on the same state, which used to create
+duplicate local files and duplicate Simplenote notes. `watch` holds the lock
+for its whole lifetime, so a cron-driven `sync` skips while `watch` is active.
+The lock is an OS file lock and is released automatically if a process crashes
+or is killed; the lock file itself can be left on disk.
 
 ### Files and names
 
@@ -220,7 +236,8 @@ on the next tick; an authentication error stops the loop.
   line-ending style is accepted when reading, and existing files are converted
   on the next sync.
 - Bookkeeping is kept in `<local_dir>/.snsync/state.json`; the trash is
-  `<local_dir>/.trash/`.
+  `<local_dir>/.trash/`. A `state.json.lock` file next to the state file is used
+  to stop concurrent runs; it can be ignored and is never edited by hand.
 
 ## When the auth host is unreachable (e.g. blocked networks)
 

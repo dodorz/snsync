@@ -74,9 +74,20 @@ func (s *State) Save() error {
 		return err
 	}
 	b = append(b, '\n')
-	tmp := s.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	// Use a unique temp file so a race with another writer can never make two
+	// processes write into the same temporary path.
+	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".state-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, s.path)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, s.path)
 }

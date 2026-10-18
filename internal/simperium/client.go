@@ -232,7 +232,16 @@ func (c *Client) Index(since string) ([]RemoteNote, string, error) {
 	var all []RemoteNote
 	mark := ""
 	cursor := ""
+	seenMarks := map[string]bool{}
 	for {
+		// A server that keeps returning the same pagination mark would make
+		// this loop run forever, so refuse to follow a mark twice.
+		if mark != "" {
+			if seenMarks[mark] {
+				return nil, "", fmt.Errorf("index: pagination mark %q repeated", mark)
+			}
+			seenMarks[mark] = true
+		}
 		q := url.Values{}
 		q.Set("data", "1")
 		q.Set("limit", "1000")

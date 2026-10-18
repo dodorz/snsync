@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/dodorz/snsync/internal/config"
+	"github.com/dodorz/snsync/internal/lock"
 	"github.com/dodorz/snsync/internal/simperium"
 	"github.com/dodorz/snsync/internal/store"
 	syncpkg "github.com/dodorz/snsync/internal/sync"
@@ -56,6 +57,13 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
+		if errors.Is(err, lock.ErrHeld) {
+			// Another run (for example the previous cron tick) still owns the
+			// state directory. Skipping is safe and keeps cron from piling up
+			// processes; the next tick will catch up.
+			fmt.Fprintln(os.Stderr, "snsync: another sync is already running; skipping")
+			return
+		}
 		fatal(err)
 	}
 }
@@ -248,10 +256,11 @@ func newClient(cfg *config.Config, token string) *simperium.Client {
 }
 
 func runSync(path string, dry, full bool) error {
-	cfg, sn, st, err := load(path)
+	cfg, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
 	}
+	defer lk.Release()
 	eng := syncpkg.New(cfg, sn, st)
 	eng.Full = full
 	eng.Log = func(format string, args ...any) {
@@ -269,10 +278,13 @@ func runSync(path string, dry, full bool) error {
 }
 
 func runWatch(path string, dry, full bool, interval time.Duration, intervalSet bool) error {
-	cfg, sn, st, err := load(path)
+	cfg, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
 	}
+	// A watch session owns the state directory for its whole lifetime, so a
+	// cron-driven `sync` skips instead of racing it.
+	defer lk.Release()
 	if !intervalSet {
 		if interval, err = cfg.WatchEvery(); err != nil {
 			return err
@@ -335,6 +347,32 @@ func runStatus(path string) error {
 	fmt.Printf("since full:   %d incremental sync(s)\n", st.IncrementalSinceFull)
 	fmt.Printf("notes:        %d (%d deleted, %d not yet pushed)\n", len(st.Notes), deleted, pending)
 	return nil
+}
+
+// loadLocked loads the config and state while holding the per-state-directory
+// lock. The caller must release the returned lock when it is finished.
+func loadLocked(path string) (*config.Config, *simperium.Client, *store.State, *lock.Lock, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, nil, nil, nil, err
+	}
+	if cfg.StateFile == "" {
+		return nil, nil, nil, nil, fmt.Errorf("local_dir is required to locate the state file")
+	}
+	lk, err := lock.Acquire(cfg.StateFile + ".lock")
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	st, err := store.LoadState(cfg.StateFile)
+	if err != nil {
+		_ = lk.Release()
+		return nil, nil, nil, nil, err
+	}
+	sn := newClient(cfg, cfg.Token)
+	return cfg, sn, st, lk, nil
 }
 
 func load(path string) (*config.Config, *simperium.Client, *store.State, error) {

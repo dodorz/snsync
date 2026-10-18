@@ -191,11 +191,20 @@ func (c *Config) Save() error {
 		return err
 	}
 	b = append(b, '\n')
-	tmp := c.path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	tmp, err := os.CreateTemp(filepath.Dir(c.path), ".config-*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, c.path)
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, c.path)
 }
 
 // expandHome expands a leading "~" path component to the current user's home

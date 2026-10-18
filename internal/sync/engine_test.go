@@ -550,3 +550,92 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 		t.Fatalf("remote tags not written to front matter: %q", got)
 	}
 }
+
+// A crash or an interrupted run can lose the state file after notes were
+// already created on the server. The next run must adopt the existing pair
+// instead of pushing a duplicate note for the local file.
+func TestLostStateAdoptsExistingNote(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "hello.md", "hello world")
+	h.run(t)
+	if h.srv.pushes != 1 || len(h.srv.notes) != 1 {
+		t.Fatalf("setup: pushes=%d notes=%d", h.srv.pushes, len(h.srv.notes))
+	}
+
+	// Forget everything the state file knew, as if the process had been killed
+	// before it could save.
+	if err := os.Remove(h.cfg.StateFile); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.LoadState(h.cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.st = st
+	h.eng = New(h.cfg, h.eng.sn, st)
+	h.eng.Log = t.Logf
+
+	h.runFull(t)
+
+	if h.srv.pushes != 1 {
+		t.Fatalf("lost state caused a duplicate push: %d pushes", h.srv.pushes)
+	}
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("lost state duplicated the server note: %d notes", len(h.srv.notes))
+	}
+	files, err := store.ListMarkdown(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != "hello world.md" {
+		t.Fatalf("unexpected local files after recovery: %v", files)
+	}
+}
+
+// Existing duplicates (for example from older snsync versions) must be
+// absorbed, not multiplied. Every extra run used to create one remote note per
+// local file and one local file per remote note, growing exponentially.
+func TestDuplicatesFromLostStateDoNotMultiply(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "hello.md", "hello world")
+	h.run(t)
+
+	// Simulate a crashed run that pushed the same content under another key and
+	// then lost the state file.
+	h.srv.put("duplicate", simperium.Note{Content: "hello world"})
+	if err := os.Remove(h.cfg.StateFile); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.LoadState(h.cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.st = st
+	h.eng = New(h.cfg, h.eng.sn, st)
+	h.eng.Log = t.Logf
+
+	pushes := h.srv.pushes
+	notes := len(h.srv.notes)
+
+	h.runFull(t)
+
+	if h.srv.pushes != pushes {
+		t.Fatalf("recovery pushed new notes: %d -> %d", pushes, h.srv.pushes)
+	}
+	if len(h.srv.notes) != notes {
+		t.Fatalf("recovery changed the server note count: %d -> %d", notes, len(h.srv.notes))
+	}
+	files, _ := store.ListMarkdown(h.dir)
+	if len(files) != 2 {
+		t.Fatalf("expected both copies locally, got %v", files)
+	}
+
+	// The next pass must be a no-op as well.
+	h.runFull(t)
+	if h.srv.pushes != pushes {
+		t.Fatalf("follow-up sync pushed more notes: %d -> %d", pushes, h.srv.pushes)
+	}
+	if got, _ := store.ListMarkdown(h.dir); len(got) != 2 {
+		t.Fatalf("follow-up sync created more files: %v", got)
+	}
+}
