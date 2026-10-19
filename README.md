@@ -184,6 +184,13 @@ unchanged rather than missing, so nothing is deleted locally by omission. If a
 local file was removed, the note is fetched once before being trashed so its
 body is preserved.
 
+A full index page can be tens of megabytes, and Simperium sometimes drops a
+large response mid-transfer. Idempotent requests are retried a few times with
+backoff on network errors, truncated bodies, `5xx` and `429`; a request
+canceled by the user is not retried. Before this, a cut-off response was fed
+to the JSON parser and surfaced as a misleading `bad JSON: invalid character
+' ' in string escape code` error that aborted the sync.
+
 If the state file is lost (for example because a run was killed before it could
 save), the next full sync matches untracked local files to untracked remote
 notes by content. The existing note is adopted instead of being pushed again,
@@ -196,6 +203,10 @@ key, default 60s), then repeats until interrupted with Ctrl-C. The first pass is
 forced full with `--full`); later passes use the incremental cursor and the
 periodic full-sync counter. Transient errors (network) are logged and retried
 on the next tick; an authentication error stops the loop.
+
+A single HTTP request gets five minutes, which must cover downloading an
+entire index page; requests are retried (see above) before a sync is declared
+failed.
 
 Every `sync` and `watch` run takes an exclusive lock on the state file
 (`<local_dir>/.snsync/state.json.lock`). A second invocation that starts while

@@ -5,10 +5,12 @@ package simperium
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -24,6 +26,16 @@ const (
 	DefaultAPIHost  = "https://api.simperium.com"
 	// NoteBucket is the Simperium bucket that holds Simplenote notes.
 	NoteBucket = "note"
+)
+
+const (
+	// requestTimeout bounds a single HTTP request, including reading the body.
+	// A full index page can be tens of megabytes on a slow link, so the budget
+	// is generous; retrying is preferred over aborting a sync.
+	requestTimeout = 5 * time.Minute
+	// maxAttempts is how often an idempotent request is retried when it fails
+	// in a way that looks transient (network error, truncated body, 5xx, 429).
+	maxAttempts = 3
 )
 
 // Note mirrors the JSON shape Simplenote stores in the "note" bucket.
@@ -151,14 +163,54 @@ func New(appID, appKey, token string) *Client {
 // newHTTPClient returns a client pinned to HTTP/1.1. Simperium's edge
 // (nginx) rejects Go's HTTP/2 requests with a 403, so ALPN is limited to
 // http/1.1. The default transport is kept so HTTPS_PROXY etc. still work.
+//
+// The timeout covers the whole request including the body, so it must be
+// generous enough for a full index page (tens of megabytes) on a slow link.
 func newHTTPClient() *http.Client {
 	tr := &http.Transport{
-		Proxy:             http.ProxyFromEnvironment,
-		ForceAttemptHTTP2: false,
-		TLSClientConfig:   &tls.Config{NextProtos: []string{"http/1.1"}},
-		TLSNextProto:      map[string]func(string, *tls.Conn) http.RoundTripper{},
+		Proxy:                 http.ProxyFromEnvironment,
+		ForceAttemptHTTP2:     false,
+		TLSClientConfig:       &tls.Config{NextProtos: []string{"http/1.1"}},
+		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{},
+		TLSHandshakeTimeout:   30 * time.Second,
+		ResponseHeaderTimeout: 60 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
 	}
-	return &http.Client{Transport: tr, Timeout: 90 * time.Second}
+	return &http.Client{Transport: tr, Timeout: requestTimeout}
+}
+
+// transportError wraps a failure that happened while sending the request or
+// reading its response, as opposed to an HTTP status the server chose to
+// return. These are usually transient.
+type transportError struct{ err error }
+
+func (e *transportError) Error() string { return e.err.Error() }
+func (e *transportError) Unwrap() error { return e.err }
+
+// statusError is a non-2xx response that is worth retrying (5xx, 429).
+type statusError struct {
+	status int
+	msg    string
+}
+
+func (e *statusError) Error() string { return e.msg }
+
+// isRetryable reports whether a failed attempt should be tried again.
+func isRetryable(err error) bool {
+	var te *transportError
+	if errors.As(err, &te) {
+		// A canceled request means the caller is going away, not a flake.
+		// A deadline, on the other hand, is exactly what retrying is for.
+		if errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			return false
+		}
+		return true
+	}
+	var se *statusError
+	if errors.As(err, &se) {
+		return se.status == http.StatusTooManyRequests || se.status >= 500
+	}
+	return false
 }
 
 // Ping performs a cheap authenticated request to check that the token is
@@ -167,7 +219,7 @@ func (c *Client) Ping() error {
 	q := url.Values{}
 	q.Set("limit", "1")
 	u := fmt.Sprintf("%s/1/%s/%s/index?%s", c.APIHost, c.AppID, NoteBucket, q.Encode())
-	return c.doJSON(http.MethodGet, u, nil, nil)
+	return c.getJSON(u, nil)
 }
 
 // AuthError indicates the token/credentials were rejected.
@@ -191,7 +243,10 @@ func (c *Client) Authorize(email, password string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
+	rb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("authorize: read response: %w", err)
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return "", &AuthError{"invalid email or password"}
 	}
@@ -224,6 +279,31 @@ type indexResponse struct {
 	Index   []indexItem `json:"index"`
 }
 
+// getJSON performs an idempotent GET, retrying transient failures with a
+// short backoff. Simperium occasionally drops a large response mid-body; a
+// retry is far better than aborting the whole sync (and the truncated body
+// used to surface as a confusing "bad JSON" error).
+func (c *Client) getJSON(u string, out any) error {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(time.Duration(attempt-1) * retryDelay)
+		}
+		lastErr = c.doJSON(http.MethodGet, u, nil, out)
+		if lastErr == nil {
+			return nil
+		}
+		if !isRetryable(lastErr) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("%w (after %d attempts)", lastErr, maxAttempts)
+}
+
+// retryDelay is the pause before the second attempt; it grows linearly with
+// each further attempt. It is a variable so tests need not sleep.
+var retryDelay = time.Second
+
 // Index fetches notes. If since is empty it fetches every note (full
 // reconciliation); otherwise only notes changed after the given cursor.
 // Pagination via "mark" is handled transparently. The returned string is the
@@ -254,7 +334,7 @@ func (c *Client) Index(since string) ([]RemoteNote, string, error) {
 		u := fmt.Sprintf("%s/1/%s/%s/index?%s", c.APIHost, c.AppID, NoteBucket, q.Encode())
 
 		var resp indexResponse
-		if err := c.doJSON(http.MethodGet, u, nil, &resp); err != nil {
+		if err := c.getJSON(u, &resp); err != nil {
 			return nil, "", err
 		}
 		if cursor == "" {
@@ -300,7 +380,7 @@ func (c *Client) Save(key string, n Note) (string, *Note, error) {
 func (c *Client) Get(key string) (*Note, error) {
 	u := fmt.Sprintf("%s/1/%s/%s/i/%s", c.APIHost, c.AppID, NoteBucket, url.PathEscape(key))
 	var n Note
-	if err := c.doJSON(http.MethodGet, u, nil, &n); err != nil {
+	if err := c.getJSON(u, &n); err != nil {
 		return nil, err
 	}
 	return &n, nil
@@ -336,19 +416,31 @@ func (c *Client) doJSON(method, u string, body any, out any) error {
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
-		return err
+		return &transportError{err}
 	}
 	defer resp.Body.Close()
-	rb, _ := io.ReadAll(resp.Body)
+
+	rb, err := io.ReadAll(resp.Body)
+	if err != nil {
+		// The status/body may be fine, but we never saw all of it. Report it
+		// as a transport failure so a retry can be attempted.
+		return &transportError{fmt.Errorf("%s %s: read response body: %w", method, u, err)}
+	}
+	if resp.ContentLength >= 0 && int64(len(rb)) != resp.ContentLength {
+		return &transportError{fmt.Errorf("%s %s: truncated response: got %d of %d bytes", method, u, len(rb), resp.ContentLength)}
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return &AuthError{fmt.Sprintf("HTTP 401 from %s", method)}
+	}
+	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
+		return &statusError{resp.StatusCode, fmt.Sprintf("%s %s: HTTP %d: %s", method, u, resp.StatusCode, truncate(rb))}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("%s %s: HTTP %d: %s", method, u, resp.StatusCode, truncate(rb))
 	}
 	if out != nil && len(rb) > 0 {
 		if err := json.Unmarshal(rb, out); err != nil {
-			return fmt.Errorf("%s %s: bad JSON: %w", method, u, err)
+			return fmt.Errorf("%s %s: bad JSON in %d-byte response: %w", method, u, len(rb), err)
 		}
 	}
 	return nil

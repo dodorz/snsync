@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 )
 
@@ -68,6 +69,92 @@ func TestNoteMarshalStaysBoolean(t *testing.T) {
 	}
 	if m["deleted"] != true {
 		t.Fatalf("deleted should marshal as a JSON boolean, got %T %v", m["deleted"], m["deleted"])
+	}
+}
+
+// A response cut short mid-body used to be parsed as-is: json.Unmarshal then
+// reported a baffling "invalid character ' ' in string escape code" and the
+// whole sync aborted. It must be recognized as a transport failure and
+// retried.
+func TestIndexRetriesTruncatedResponse(t *testing.T) {
+	old := retryDelay
+	retryDelay = 0
+	defer func() { retryDelay = old }()
+
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/note/index") {
+			http.NotFound(w, r)
+			return
+		}
+		if calls.Add(1) == 1 {
+			// Announce 100 bytes but send only a prefix that ends right after
+			// a backslash, exactly like a dropped connection.
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", "100")
+			_, _ = w.Write([]byte(`{"current":"1","index":[{"id":"a","v":1,"d":{"content":"x\`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"current": "2",
+			"index": []any{
+				map[string]any{"id": "a", "v": 1, "d": map[string]any{"content": "hello"}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := New("app", "key", "tok")
+	c.APIHost = srv.URL
+
+	notes, cursor, err := c.Index("")
+	if err != nil {
+		t.Fatalf("Index should have recovered by retrying: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("expected 2 attempts, got %d", calls.Load())
+	}
+	if len(notes) != 1 || notes[0].Note.Content != "hello" || cursor != "2" {
+		t.Fatalf("unexpected result: notes=%+v cursor=%q", notes, cursor)
+	}
+}
+
+// A 500 is transient and retried; a 400 is not worth retrying.
+func TestGetJSONRetryPolicy(t *testing.T) {
+	old := retryDelay
+	retryDelay = 0
+	defer func() { retryDelay = old }()
+
+	cases := []struct {
+		name      string
+		status    int
+		wantCalls int32
+		wantErr   bool
+	}{
+		{"server error is retried", http.StatusInternalServerError, maxAttempts, true},
+		{"rate limit is retried", http.StatusTooManyRequests, maxAttempts, true},
+		{"bad request is not retried", http.StatusBadRequest, 1, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				w.WriteHeader(tc.status)
+			}))
+			defer srv.Close()
+
+			c := New("app", "key", "tok")
+			c.APIHost = srv.URL
+			err := c.getJSON(srv.URL+"/x", nil)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("err = %v, wantErr = %v", err, tc.wantErr)
+			}
+			if got := calls.Load(); got != tc.wantCalls {
+				t.Fatalf("attempts = %d, want %d", got, tc.wantCalls)
+			}
+		})
 	}
 }
 
