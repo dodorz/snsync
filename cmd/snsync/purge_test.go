@@ -7,51 +7,92 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/dodorz/snsync/internal/simperium"
 	"github.com/dodorz/snsync/internal/store"
 )
+
+// purgeServer is the two Simperium endpoints purge-trash uses: the full index
+// and a hard DELETE.
+type purgeServer struct {
+	mu        sync.Mutex
+	notes     map[string]simperium.Note
+	requested map[string]bool
+}
+
+func (f *purgeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if strings.HasSuffix(r.URL.Path, "/note/index") {
+		type item struct {
+			ID string          `json:"id"`
+			V  int             `json:"v"`
+			D  json.RawMessage `json:"d"`
+		}
+		resp := struct {
+			Current string `json:"current"`
+			Count   int    `json:"count"`
+			Index   []item `json:"index"`
+		}{Current: "cursor-1"}
+		for id, n := range f.notes {
+			d, _ := json.Marshal(n)
+			resp.Index = append(resp.Index, item{ID: id, V: 1, D: d})
+		}
+		resp.Count = len(resp.Index)
+		_ = json.NewEncoder(w).Encode(resp)
+		return
+	}
+
+	if r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/note/i/") {
+		key := path.Base(r.URL.Path)
+		f.requested[key] = true
+		if key == "gone" {
+			delete(f.notes, key) // already hard-deleted by someone else
+			http.NotFound(w, r)
+			return
+		}
+		delete(f.notes, key)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	http.NotFound(w, r)
+}
 
 func TestPurgeTrashOnlyDeletesRecent(t *testing.T) {
 	dir := t.TempDir()
 	statePath := filepath.Join(dir, ".snsync", "state.json")
 	cfgPath := filepath.Join(dir, "config.json")
 
-	var mu sync.Mutex
-	requested := map[string]bool{}
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodDelete {
-			http.NotFound(w, r)
-			return
-		}
-		key := path.Base(r.URL.Path)
-		mu.Lock()
-		requested[key] = true
-		mu.Unlock()
-		if key == "gone" {
-			http.NotFound(w, r)
-			return
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
+	now := time.Now()
+	api := &purgeServer{
+		notes: map[string]simperium.Note{
+			"live":   {Content: "live content", ModificationDate: float64(now.Unix())},
+			"recent": {Content: "live content", Deleted: true, ModificationDate: float64(now.Add(-time.Hour).Unix())},
+			"gone":   {Content: "live content", Deleted: true, ModificationDate: float64(now.Add(-time.Hour).Unix())},
+			"orphan": {Content: "unique content", Deleted: true, ModificationDate: float64(now.Add(-time.Hour).Unix())},
+			"old":    {Content: "live content", Deleted: true, ModificationDate: float64(now.Add(-72 * time.Hour).Unix())},
+		},
+		requested: map[string]bool{},
+	}
+	srv := httptest.NewServer(api)
 	defer srv.Close()
-
-	now := float64(time.Now().Unix())
-	recent := now - 3600
-	old := now - 72*3600
 
 	st, err := store.LoadState(statePath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	st.Notes = map[string]*store.NoteState{
-		"recent": {ID: "recent", ServerKey: "recent", Filename: "recent.md", BaseHash: "h-live", Deleted: true, ModTime: recent},
-		"gone":   {ID: "gone", ServerKey: "gone", Filename: "gone.md", BaseHash: "h-live", Deleted: true, ModTime: recent},
-		"orphan": {ID: "orphan", ServerKey: "orphan", Filename: "orphan.md", BaseHash: "h-unique", Deleted: true, ModTime: recent},
-		"old":    {ID: "old", ServerKey: "old", Filename: "old.md", BaseHash: "h-old", Deleted: true, ModTime: old},
 		"live":   {ID: "live", ServerKey: "live", Filename: "live.md", BaseHash: "h-live"},
+		"recent": {ID: "recent", ServerKey: "recent", BaseHash: "h-live", Deleted: true},
+		"gone":   {ID: "gone", ServerKey: "gone", BaseHash: "h-live", Deleted: true},
+		"orphan": {ID: "orphan", ServerKey: "orphan", BaseHash: "h-unique", Deleted: true},
+		"old":    {ID: "old", ServerKey: "old", BaseHash: "h-live", Deleted: true},
 	}
 	if err := st.Save(); err != nil {
 		t.Fatal(err)
@@ -71,27 +112,27 @@ func TestPurgeTrashOnlyDeletesRecent(t *testing.T) {
 	if err := runPurgeTrash(cfgPath, 48*time.Hour, false, 2, false); err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
-	if len(requested) != 0 {
-		t.Fatalf("dry run deleted %v", requested)
+	api.mu.Lock()
+	if len(api.requested) != 0 {
+		t.Fatalf("dry run deleted %v", api.requested)
 	}
-	mu.Unlock()
+	api.mu.Unlock()
 
 	if err := runPurgeTrash(cfgPath, 48*time.Hour, true, 2, false); err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
+	api.mu.Lock()
 	for _, key := range []string{"recent", "gone"} {
-		if !requested[key] {
+		if !api.requested[key] {
 			t.Errorf("expected %s to be purged", key)
 		}
 	}
 	for _, key := range []string{"orphan", "old", "live"} {
-		if requested[key] {
+		if api.requested[key] {
 			t.Errorf("%s should not have been deleted", key)
 		}
 	}
-	mu.Unlock()
+	api.mu.Unlock()
 
 	got, err := store.LoadState(statePath)
 	if err != nil {
@@ -117,11 +158,11 @@ func TestPurgeTrashOnlyDeletesRecent(t *testing.T) {
 	if err := runPurgeTrash(cfgPath, 48*time.Hour, true, 2, true); err != nil {
 		t.Fatal(err)
 	}
-	mu.Lock()
-	if !requested["orphan"] {
+	api.mu.Lock()
+	if !api.requested["orphan"] {
 		t.Error("--purge-orphans did not delete the orphan")
 	}
-	mu.Unlock()
+	api.mu.Unlock()
 	got, err = store.LoadState(statePath)
 	if err != nil {
 		t.Fatal(err)

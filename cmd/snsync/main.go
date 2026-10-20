@@ -50,6 +50,8 @@ func main() {
 		err = runStatus(opts.configPath)
 	case "purge-trash":
 		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans)
+	case "prune-state":
+		err = runPruneState(opts.configPath, opts.dryRun)
 	case "version":
 		fmt.Printf("snsync %s\n", version)
 	case "help":
@@ -479,6 +481,8 @@ commands:
   status    show sync state summary
   purge-trash
             permanently delete recently trashed notes (older trash is kept)
+  prune-state
+            drop bookkeeping for already-trashed notes to shrink state.json
   version   print the program version
   help      show this message
 

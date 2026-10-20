@@ -111,6 +111,9 @@ git tag 0.1.2 && git push origin 0.1.2
 # permanently delete notes trashed in the last 48h (dry run first)
 ./snsync purge-trash --since 48h
 ./snsync purge-trash --since 48h --yes
+
+# drop bookkeeping for notes that are already in the trash
+./snsync prune-state
 ```
 
 Config lives at `~/.config/snsync/config.json` by default; use `-c path` to
@@ -189,9 +192,10 @@ intentional cleanup.
 ### Emptying recent trash
 
 `snsync purge-trash --since 48h` permanently deletes notes that were moved to
-the Simplenote trash within the last 48 hours and leaves older trash
-alone. It reads the deletion time from the state file, so it does not need a
-full account download. The command is a dry run unless `--yes` is given:
+the Simplenote trash within the last 48 hours and leaves older trash alone. It
+scans the remote note index (which can take a while on a large account) so it
+also sees notes trashed by another client, and it is a dry run unless `--yes`
+is given:
 
 ```sh
 ./snsync purge-trash --since 48h              # show how many would be deleted
@@ -204,11 +208,17 @@ exists in a live note, so the cleanup cannot permanently remove the only
 remaining copy of something. The dry run reports how many such "orphans" were
 kept; `--purge-orphans` deletes those as well.
 
-Run a successful `sync` first so the state file knows about the latest
-deletions. Hard deletes cannot be undone; a note deleted this way no longer
-appears in Simplenote's trash. Notes already absent from the server (HTTP 404)
-are treated as successfully purged, so an interrupted cleanup can simply be
-re-run.
+Run a successful `sync` first so local changes are already reflected remotely.
+Hard deletes cannot be undone; a note deleted this way no longer appears in
+Simplenote's trash. Notes already absent from the server (HTTP 404) are treated
+as successfully purged, so an interrupted cleanup can simply be re-run.
+
+`state.json` only needs entries for **live** notes: they map a local file to a
+server key and hold the last synced hash. Trashed notes are recognised as
+deleted from the remote index, so full syncs no longer copy the whole
+Simplenote trash into the state file. An older or already bloated state file
+can be compacted with `snsync prune-state`, which drops every `deleted` entry
+and leaves the cursor and live notes untouched. Add `--dry-run` to preview it.
 
 ### Incremental sync
 

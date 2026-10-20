@@ -3,26 +3,30 @@ package main
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/dodorz/snsync/internal/simperium"
+	"github.com/dodorz/snsync/internal/store"
 )
 
 // purgeTarget is a trashed note that the user asked to hard-delete.
 type purgeTarget struct {
-	stateKey  string // key in state.Notes (not always the server key)
 	serverKey string
-	filename  string
 	hash      string
+	label     string
+	modTime   float64
 }
 
-// runPurgeTrash permanently deletes notes that were moved to the Simplenote
-// trash within the --since window. Older trash entries are left untouched.
+// runPurgeTrash permanently deletes notes that are currently in the Simplenote
+// trash and were modified (trashed) within the --since window. Older trash is
+// left untouched.
 //
-// The state file already records every trashed note and the time the deletion
-// was synced, so no full index download is needed. Without --yes the command
-// only reports what it would do.
+// The full index is scanned instead of relying on tombstones in the state
+// file: state only tracks live notes, and a note may have been trashed by
+// another client without ever appearing in a local pass. Without --yes the
+// command only reports what it would do.
 func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOrphans bool) error {
 	_, sn, st, lk, err := loadLocked(path)
 	if err != nil {
@@ -38,35 +42,47 @@ func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOr
 	}
 	cutoff := float64(time.Now().Add(-since).Unix())
 
+	fmt.Println("fetching the note index (this can take a while on a large account)...")
+	remotes, _, err := sn.Index("")
+	if err != nil {
+		return err
+	}
+
 	// Content hashes that still have a live note. A trashed note whose content
 	// is not represented anywhere else is kept by default: purging it would
 	// permanently remove the only remaining copy.
 	liveHashes := map[string]bool{}
-	for _, n := range st.Notes {
-		if !n.Deleted && n.BaseHash != "" {
-			liveHashes[n.BaseHash] = true
+	for _, r := range remotes {
+		if !r.Note.Deleted {
+			liveHashes[store.HashContent(r.Note.Content)] = true
 		}
 	}
 
 	var targets []purgeTarget
 	older, orphans := 0, 0
-	for key, n := range st.Notes {
-		if !n.Deleted || n.ServerKey == "" {
+	for _, r := range remotes {
+		if !r.Note.Deleted {
 			continue
 		}
-		if n.ModTime < cutoff {
+		if r.Note.ModificationDate < cutoff {
 			older++
 			continue
 		}
-		if !purgeOrphans && (n.BaseHash == "" || !liveHashes[n.BaseHash]) {
+		h := store.HashContent(r.Note.Content)
+		if !purgeOrphans && !liveHashes[h] {
 			orphans++
 			continue
 		}
-		targets = append(targets, purgeTarget{stateKey: key, serverKey: n.ServerKey, filename: n.Filename, hash: n.BaseHash})
+		targets = append(targets, purgeTarget{
+			serverKey: r.ID,
+			hash:      h,
+			label:     noteLabel(r.Note.Content),
+			modTime:   r.Note.ModificationDate,
+		})
 	}
 	sort.Slice(targets, func(i, j int) bool {
-		if targets[i].filename != targets[j].filename {
-			return targets[i].filename < targets[j].filename
+		if targets[i].modTime != targets[j].modTime {
+			return targets[i].modTime < targets[j].modTime
 		}
 		return targets[i].serverKey < targets[j].serverKey
 	})
@@ -86,17 +102,22 @@ func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOr
 				fmt.Printf("... and %d more\n", len(targets)-10)
 				break
 			}
-			label := t.filename
-			if label == "" {
-				label = shortHash(t.hash)
-			}
-			fmt.Printf("  would purge %-32s %s\n", t.serverKey, label)
+			fmt.Printf("  would purge %-32s %s\n", t.serverKey, t.label)
 		}
 		fmt.Println("dry run: re-run with --yes to permanently delete these notes")
 		return nil
 	}
 
-	// Deletions are independent HTTP requests; a few workers keep a 19k-note
+	// Build a server-key -> state-key index so the state file can be updated
+	// without scanning it once per deletion.
+	stateKeys := map[string][]string{}
+	for key, n := range st.Notes {
+		if n.ServerKey != "" {
+			stateKeys[n.ServerKey] = append(stateKeys[n.ServerKey], key)
+		}
+	}
+
+	// Deletions are independent HTTP requests; a few workers keep a large
 	// cleanup from taking hours while staying polite to the API.
 	todo := make(chan purgeTarget)
 	type result struct {
@@ -133,16 +154,14 @@ func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOr
 	for r := range results {
 		if r.err != nil {
 			failed++
-			fmt.Printf("failed %s (%s): %v\n", r.target.filename, r.target.serverKey, r.err)
+			fmt.Printf("failed %s (%s): %v\n", r.target.label, r.target.serverKey, r.err)
 			continue
 		}
-		delete(st.Notes, r.target.stateKey)
-		done++
-		label := r.target.filename
-		if label == "" {
-			label = shortHash(r.target.hash)
+		for _, key := range stateKeys[r.target.serverKey] {
+			delete(st.Notes, key)
 		}
-		fmt.Printf("purge  %s\n", label)
+		done++
+		fmt.Printf("purge  %s\n", r.target.label)
 		// Persist progress so an interrupted cleanup can resume cheaply.
 		if done%1000 == 0 {
 			if err := st.Save(); err != nil {
@@ -155,14 +174,22 @@ func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOr
 	}
 	fmt.Printf("purged %d note(s) permanently; %d failed\n", done, failed)
 	if failed > 0 {
-		return fmt.Errorf("%d note(s) could not be purged; they remain in the state file", failed)
+		return fmt.Errorf("%d note(s) could not be purged", failed)
 	}
 	return nil
 }
 
-func shortHash(h string) string {
-	if len(h) > 12 {
-		return h[:12]
+// noteLabel returns a short, human-readable label for a trashed note.
+func noteLabel(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if r := []rune(line); len(r) > 60 {
+			return string(r[:60]) + "..."
+		}
+		return line
 	}
-	return h
+	return "(empty)"
 }

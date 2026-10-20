@@ -581,8 +581,28 @@ func TestLocalDeletePropagates(t *testing.T) {
 	if !n.Deleted {
 		t.Fatal("local deletion was not propagated as deleted=true")
 	}
-	if !h.stateByServerKey(id).Deleted {
-		t.Fatal("state did not record the deletion")
+	if st := h.stateByServerKey(id); st != nil {
+		t.Fatalf("trashed note should not stay in the state file: %+v", st)
+	}
+}
+
+func TestFullSyncDoesNotAccumulateTrash(t *testing.T) {
+	h := newHarness(t)
+	// A note that only exists in the remote trash, plus a live one so the
+	// state file is non-empty.
+	h.srv.put("live", simperium.Note{Content: "live note"})
+	h.srv.put("trash", simperium.Note{Content: "only in trash", Deleted: true})
+
+	h.runFull(t)
+
+	if st := h.stateByServerKey("trash"); st != nil {
+		t.Fatalf("trashed note was added to the state file: %+v", st)
+	}
+	if len(h.st.Notes) != 1 {
+		t.Fatalf("expected only the live note in state, got %d entries", len(h.st.Notes))
+	}
+	if st := h.stateByServerKey("live"); st == nil || st.Deleted {
+		t.Fatalf("live note missing from state: %+v", st)
 	}
 }
 

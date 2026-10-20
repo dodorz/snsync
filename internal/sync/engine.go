@@ -706,7 +706,6 @@ func (w *work) decideLocalOnly() {
 	default:
 		// Local file removed: propagate the deletion.
 		w.finalDeleted = true
-		w.preserveBase = true
 		if !w.st.Deleted {
 			w.updateRemote = true
 			w.pushedDelete = true
@@ -1029,10 +1028,10 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 	for _, id := range ids {
 		w := works[id]
 		if w.finalDeleted {
-			keep := w.remoteExists || w.pushedDelete
-			if !keep {
-				continue
-			}
+			// Trashed notes need no bookkeeping: only live notes map a local
+			// file to a server key. Keeping tombstones here made every full
+			// sync copy the entire Simplenote trash into the state file.
+			continue
 		}
 		baseHash := store.HashContent(w.finalContent)
 		if w.preserveBase && w.st != nil && w.st.BaseHash != "" {
@@ -1043,7 +1042,6 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 			BaseHash:   baseHash,
 			Tags:       w.finalTags,
 			SystemTags: w.finalSystemTags,
-			Deleted:    w.finalDeleted,
 			ModTime:    float64(time.Now().Unix()),
 		}
 		if w.st != nil {
@@ -1055,13 +1053,8 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 			}
 			ns.Version = w.remote.Version
 			ns.ModTime = w.remote.Note.ModificationDate
-			if w.finalDeleted {
-				ns.BaseHash = store.HashContent(w.remote.Note.Content)
-			}
 		}
-		if !w.finalDeleted {
-			ns.Filename = w.finalFilename
-		}
+		ns.Filename = w.finalFilename
 		next[id] = ns
 	}
 	e.st.Notes = next
