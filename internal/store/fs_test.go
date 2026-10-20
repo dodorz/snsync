@@ -77,6 +77,64 @@ func TestSetFrontMatterTags(t *testing.T) {
 	}
 }
 
+func TestFrontMatterID(t *testing.T) {
+	cases := []struct {
+		front string
+		id    string
+	}{
+		{"", ""},
+		{"---\ntitle: x\n---\n", ""},
+		{"---\nsimplenote_id: abc\n---\n", "abc"},
+		{"---\nsimplenote_id: \"a b\"\n---\n", "a b"},
+		{"---\nsimplenote_id:\n---\n", ""},
+		// TOML blocks are not interpreted, like FrontMatterTags.
+		{"+++\nsimplenote_id = \"abc\"\n+++\n", ""},
+	}
+	for _, tc := range cases {
+		if got := FrontMatterID(tc.front); got != tc.id {
+			t.Errorf("FrontMatterID(%q) = %q, want %q", tc.front, got, tc.id)
+		}
+	}
+}
+
+func TestSetFrontMatterID(t *testing.T) {
+	cases := []struct {
+		front string
+		id    string
+		want  string
+	}{
+		{"", "abc", "---\nsimplenote_id: abc\n---\n"},
+		{"---\ntitle: x\n---\n", "abc", "---\ntitle: x\nsimplenote_id: abc\n---\n"},
+		{"---\ntitle: x\nsimplenote_id: old\n---\n", "new", "---\ntitle: x\nsimplenote_id: new\n---\n"},
+		// Removing the only key drops the whole block.
+		{"---\nsimplenote_id: old\n---\n", "", ""},
+		{"", "", ""},
+		{"+++\nx = 1\n+++\n", "abc", "+++\nx = 1\n+++\n"},
+	}
+	for _, tc := range cases {
+		if got := SetFrontMatterID(tc.front, tc.id); got != tc.want {
+			t.Errorf("SetFrontMatterID(%q, %q) = %q, want %q", tc.front, tc.id, got, tc.want)
+		}
+	}
+}
+
+// applyLocal sets the id first and the tags second; doing it twice must produce
+// the same bytes, otherwise every sync would rewrite every file.
+func TestFrontMatterIDComposesWithTags(t *testing.T) {
+	build := func(front string) string {
+		front = SetFrontMatterID(front, "abc")
+		return SetFrontMatterTags(front, []string{"a", "b"})
+	}
+	got := build("---\ntitle: x\n---\n")
+	want := "---\ntitle: x\nsimplenote_id: abc\ntags:\n  - a\n  - b\n---\n"
+	if got != want {
+		t.Fatalf("first pass = %q, want %q", got, want)
+	}
+	if again := build(got); again != got {
+		t.Fatalf("second pass is not stable: %q -> %q", got, again)
+	}
+}
+
 func TestEncodeNoteUsesCRLF(t *testing.T) {
 	got := EncodeNote("---\ntitle: x\n---\n", "a\nb")
 	want := "---\r\ntitle: x\r\n---\r\na\r\nb"

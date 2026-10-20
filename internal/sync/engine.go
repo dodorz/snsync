@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/dodorz/snsync/internal/config"
@@ -75,6 +76,33 @@ type work struct {
 	// preserveBase keeps the stored base hash instead of recomputing it from
 	// content we do not have (incremental tombstones).
 	preserveBase bool
+	// inferredRename marks a rename that was guessed (only one file and one
+	// note were left over) rather than proven by note id or content. The body
+	// that is about to be overwritten is copied into the trash first, so a
+	// wrong guess costs a stray file instead of the note's content.
+	inferredRename bool
+}
+
+// noteID is the Simplenote key this work belongs to, or "" while the note has
+// not been given one yet. It is written into the file's front matter so that a
+// later rename can be recognised even after an edit.
+func (w *work) noteID() string {
+	if w.st != nil && w.st.ServerKey != "" {
+		return w.st.ServerKey
+	}
+	return ""
+}
+
+// localFile is a markdown file on disk that no state entry claims yet. It is
+// either a manual rename of a tracked note or a brand new note.
+type localFile struct {
+	name    string
+	front   string
+	body    string
+	tags    []string
+	tagsSet bool
+	hash    string
+	id      string // front matter note id, empty when absent
 }
 
 // Run executes one full sync pass. When dryRun is set nothing is written.
@@ -117,6 +145,7 @@ func (e *Engine) Run(dryRun bool) error {
 	e.decideAll(works)
 	e.addConflictCopies(works)
 	e.assignFilenames(works)
+	e.assignKeys(works)
 
 	ids := sortedIDs(works)
 
@@ -202,7 +231,8 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		w.localFilename = w.st.Filename
 	}
 
-	// Files on disk that no tracked note claims: renames or brand new notes.
+	// Files on disk that no tracked note claims: manual renames or brand new
+	// notes.
 	files, _ := store.ListMarkdown(e.cfg.LocalDir)
 	claimed := map[string]bool{}
 	for _, w := range works {
@@ -210,93 +240,163 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			claimed[w.localFilename] = true
 		}
 	}
-	missingByHash := map[string]*work{}
-	for _, w := range works {
-		if !w.localExists && w.st.ServerKey != "" && !w.st.Deleted && w.st.BaseHash != "" {
-			missingByHash[w.st.BaseHash] = w
+
+	// Tracked notes whose file vanished locally are rename candidates. They are
+	// recognised, in decreasing order of confidence, by the note id in the
+	// file's front matter, by an identical body hash, and finally — when
+	// exactly one file and one note are left unaccounted for — by a plain
+	// one-to-one pairing. The last two exist because the id is only written by
+	// newer versions and never for TOML front matter; the pairing also catches
+	// a rename that was combined with an edit in a single step.
+	var missing []*work
+	missingByID := map[string]*work{}
+	liveByID := map[string]bool{}
+	for _, id := range sortedIDs(works) {
+		w := works[id]
+		if w.localExists {
+			if w.st.ServerKey != "" {
+				liveByID[strings.ToLower(w.st.ServerKey)] = true
+			}
+			continue
 		}
+		if w.st.ServerKey == "" || w.st.Deleted {
+			continue
+		}
+		missing = append(missing, w)
+		missingByID[strings.ToLower(w.st.ServerKey)] = w
 	}
+
 	// Remote notes that no state entry claims. If state was lost (crash,
 	// interrupted run, deleted state file) these notes look brand new even
-	// though a local file with the same content may already exist. Match them
-	// by content so a lost state file cannot cause an endless stream of
-	// duplicate notes.
+	// though a local file may already belong to them. Match them by id, and by
+	// content as a fallback, so a lost state file cannot cause an endless
+	// stream of duplicate notes.
 	unclaimedRemoteByHash := map[string][]string{}
+	unclaimedRemoteByID := map[string]string{}
 	for id, r := range remoteByID {
 		if r.Note.Deleted {
 			continue
 		}
 		h := store.HashContent(r.Note.Content)
 		unclaimedRemoteByHash[h] = append(unclaimedRemoteByHash[h], id)
+		unclaimedRemoteByID[strings.ToLower(id)] = id
 	}
 	for h := range unclaimedRemoteByHash {
 		sort.Strings(unclaimedRemoteByHash[h])
 	}
+
+	var strays []*localFile
 	for _, name := range files {
 		if claimed[name] {
 			continue
 		}
-		p := filepath.Join(e.cfg.LocalDir, name)
-		full, err := store.ReadFile(p)
+		full, err := store.ReadFile(filepath.Join(e.cfg.LocalDir, name))
 		if err != nil {
 			continue
 		}
 		front, body := store.SplitFrontMatter(full)
 		tags, tagsSet := store.FrontMatterTags(front)
-		h := store.HashContent(body)
-		if w, ok := missingByHash[h]; ok {
-			// Same content, new name: a manual rename. Adopt it.
-			w.localExists = true
-			w.localFront = front
-			w.localTags = tags
-			w.localTagsSet = tagsSet
-			w.localContent = body
-			w.localHash = h
-			w.localFilename = name
-			claimed[name] = true
-			delete(missingByHash, h)
+		strays = append(strays, &localFile{
+			name: name, front: front, body: body,
+			tags: tags, tagsSet: tagsSet,
+			hash: store.HashContent(body),
+			id:   store.FrontMatterID(front),
+		})
+	}
+
+	adopted := map[*work]bool{}
+	var pending []*localFile
+
+	// Pass 1: the note id in the front matter.
+	for _, f := range strays {
+		key := strings.ToLower(f.id)
+		if key != "" {
+			if w := missingByID[key]; w != nil && !adopted[w] {
+				// The file that used to carry this id is gone, this one carries
+				// it: a rename, which survives an edit done in the same step.
+				e.adoptRename(w, f, "id")
+				adopted[w] = true
+				continue
+			}
+			if rid, ok := unclaimedRemoteByID[key]; ok {
+				// No state entry, but the id names an existing note: re-adopt it
+				// instead of pushing a duplicate.
+				w := e.adoptRemote(works, remoteByID, rid, f)
+				adopted[w] = true
+				delete(unclaimedRemoteByID, key)
+				deleteUnclaimedHash(unclaimedRemoteByHash, rid)
+				continue
+			}
+		}
+		pending = append(pending, f)
+	}
+
+	// Recompute the candidates now that pass 1 consumed some of them.
+	var stillMissing []*work
+	idleByHash := map[string]*work{}
+	for _, w := range missing {
+		if adopted[w] {
 			continue
 		}
-		if ids := unclaimedRemoteByHash[h]; len(ids) > 0 {
+		stillMissing = append(stillMissing, w)
+		if w.st.BaseHash != "" {
+			idleByHash[w.st.BaseHash] = w
+		}
+	}
+
+	// Pass 2: identical body content.
+	var rest []*localFile
+	for _, f := range pending {
+		if w, ok := idleByHash[f.hash]; ok {
+			// Same content, new name: a manual rename. Adopt it.
+			e.adoptRename(w, f, "content")
+			adopted[w] = true
+			delete(idleByHash, f.hash)
+			continue
+		}
+		if ids := unclaimedRemoteByHash[f.hash]; len(ids) > 0 {
 			// Same content on both sides but no state entry: adopt the pair
 			// instead of pushing a duplicate and pulling another copy.
-			remoteID := ids[0]
-			unclaimedRemoteByHash[h] = ids[1:]
-			r := remoteByID[remoteID]
-			delete(remoteByID, remoteID)
-			rr := r
-			works[remoteID] = &work{
-				id: remoteID,
-				// Base the state on the remote metadata; any local tag
-				// differences are merged and pushed normally.
-				st: &store.NoteState{
-					ID: remoteID, ServerKey: remoteID, BaseHash: h,
-					Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
-				},
-				remote:        &rr,
-				remoteExists:  true,
-				localExists:   true,
-				localFront:    front,
-				localTags:     tags,
-				localTagsSet:  tagsSet,
-				localContent:  body,
-				localHash:     h,
-				localFilename: name,
-			}
-			claimed[name] = true
+			rID := ids[0]
+			unclaimedRemoteByHash[f.hash] = ids[1:]
+			w := e.adoptRemote(works, remoteByID, rID, f)
+			adopted[w] = true
+			delete(unclaimedRemoteByID, strings.ToLower(rID))
 			continue
 		}
+		rest = append(rest, f)
+	}
+
+	// Pass 3: exactly one file and one note left over. Trust the pairing; this
+	// is what makes "rename and edit at once" keep the original note.
+	var lastMissing []*work
+	for _, w := range stillMissing {
+		if !adopted[w] {
+			lastMissing = append(lastMissing, w)
+		}
+	}
+	if len(rest) == 1 && len(lastMissing) == 1 && !liveByID[strings.ToLower(rest[0].id)] {
+		e.adoptRename(lastMissing[0], rest[0], "sole local change")
+		lastMissing[0].inferredRename = true
+		adopted[lastMissing[0]] = true
+		rest = nil
+	}
+
+	// Whatever is left over is a brand new local note. A stale or duplicated
+	// note id in its front matter is overwritten once the note gets its own
+	// key (see applyLocal), so it cannot keep pointing at another note.
+	for _, f := range rest {
 		id := "local:" + localHex(8)
 		works[id] = &work{
 			id:            id,
 			st:            &store.NoteState{ID: id},
 			localExists:   true,
-			localFront:    front,
-			localTags:     tags,
-			localTagsSet:  tagsSet,
-			localContent:  body,
-			localHash:     h,
-			localFilename: name,
+			localFront:    f.front,
+			localTags:     f.tags,
+			localTagsSet:  f.tagsSet,
+			localContent:  f.body,
+			localHash:     f.hash,
+			localFilename: f.name,
 		}
 	}
 
@@ -306,6 +406,64 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		works[id] = &work{id: id, remote: &rr, remoteExists: true}
 	}
 	return works
+}
+
+// deleteUnclaimedHash drops a remote id from the by-content index once the note
+// has been claimed, so it cannot be handed out twice.
+func deleteUnclaimedHash(byHash map[string][]string, id string) {
+	for h, ids := range byHash {
+		for i, got := range ids {
+			if got == id {
+				byHash[h] = append(ids[:i:i], ids[i+1:]...)
+				if len(byHash[h]) == 0 {
+					delete(byHash, h)
+				}
+				return
+			}
+		}
+	}
+}
+
+// adoptRename binds a stray file to an existing note, keeping that note's
+// server key. how names the signal that identified the pair, for the log.
+func (e *Engine) adoptRename(w *work, f *localFile, how string) {
+	w.localExists = true
+	w.localFront = f.front
+	w.localTags = f.tags
+	w.localTagsSet = f.tagsSet
+	w.localContent = f.body
+	w.localHash = f.hash
+	w.localFilename = f.name
+	e.Log("adopt  %s -> %s (%s)", f.name, w.st.Filename, how)
+}
+
+// adoptRemote pairs a stray file with a remote note that no state entry claims
+// (state was lost, or a push succeeded but its response was never seen). The
+// base is taken from the remote content, so any local edit is still pushed.
+func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simperium.RemoteNote, remoteID string, f *localFile) *work {
+	r := remoteByID[remoteID]
+	delete(remoteByID, remoteID)
+	w := &work{
+		id: remoteID,
+		// Base the state on the remote metadata; any local tag differences
+		// are merged and pushed normally.
+		st: &store.NoteState{
+			ID: remoteID, ServerKey: remoteID, BaseHash: store.HashContent(r.Note.Content),
+			Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
+		},
+		remote:        &r,
+		remoteExists:  true,
+		localExists:   true,
+		localFront:    f.front,
+		localTags:     f.tags,
+		localTagsSet:  f.tagsSet,
+		localContent:  f.body,
+		localHash:     f.hash,
+		localFilename: f.name,
+	}
+	works[remoteID] = w
+	e.Log("adopt  %s (existing note %s)", f.name, remoteID)
+	return w
 }
 
 func (e *Engine) decideAll(works map[string]*work) {
@@ -608,6 +766,33 @@ func (e *Engine) assignFilenames(works map[string]*work) {
 	}
 }
 
+// assignKeys makes sure every note that is going to be written has a server
+// key before any file is touched. New notes get a client-chosen key: Simperium
+// accepts one at creation time and Save puts it in the URL, so the key can be
+// recorded in the file's front matter in the same pass instead of one sync
+// later (which also means a push whose response is lost can still be
+// recognised, by that key, on the next run).
+func (e *Engine) assignKeys(works map[string]*work) {
+	for _, id := range sortedIDs(works) {
+		w := works[id]
+		if w.st == nil {
+			w.st = &store.NoteState{ID: id}
+		}
+		if w.st.ID == "" {
+			w.st.ID = id
+		}
+		switch {
+		case w.st.ServerKey != "":
+			// Known already.
+		case w.remoteExists:
+			w.st.ServerKey = w.remote.ID
+		case w.createRemote:
+			w.st.ServerKey = localHex(16)
+			w.st.Version = 0
+		}
+	}
+}
+
 func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) error {
 	for _, id := range ids {
 		w := works[id]
@@ -629,9 +814,12 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		}
 
 		target := filepath.Join(e.cfg.LocalDir, w.finalFilename)
-		// Front matter is preserved, but its tags field mirrors the synced
-		// tags, and line endings are forced to CRLF.
-		front := store.SetFrontMatterTags(w.localFront, w.finalTags)
+		// Front matter is preserved, but its tags field mirrors the synced tags,
+		// its note id records which Simplenote note the file belongs to, and
+		// line endings are forced to CRLF. The id is rewritten from the state on
+		// every pass, so a hand-edited or copied id is corrected here.
+		front := store.SetFrontMatterID(w.localFront, w.noteID())
+		front = store.SetFrontMatterTags(front, w.finalTags)
 		if oldPath != "" && oldPath != target && store.Exists(oldPath) {
 			e.Log("rename %s -> %s", w.localFilename, w.finalFilename)
 			if !dryRun {
@@ -699,7 +887,10 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			if dryRun {
 				continue
 			}
-			key, _, err := e.sn.Save("", note)
+			// The key was chosen up front (assignKeys) so that the file could
+			// already record it. Save falls back to generating one if it is
+			// empty, so keep whatever it reports.
+			key, _, err := e.sn.Save(w.noteID(), note)
 			if err != nil {
 				return err
 			}
@@ -714,12 +905,45 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			if dryRun {
 				continue
 			}
+			if err := e.keepOverwrittenBody(w); err != nil {
+				return err
+			}
 			if _, _, err := e.sn.Save(w.st.ServerKey, note); err != nil {
 				return err
 			}
 			e.recordProgress(w)
 		}
 	}
+	return nil
+}
+
+// keepOverwrittenBody copies the server version into the local trash before an
+// inferred rename overwrites it. See work.inferredRename.
+func (e *Engine) keepOverwrittenBody(w *work) error {
+	if !w.inferredRename {
+		return nil
+	}
+	old := ""
+	switch {
+	case w.remoteExists:
+		old = w.remote.Note.Content
+	case w.st != nil && w.st.ServerKey != "":
+		if rn, err := e.sn.Get(w.st.ServerKey); err == nil && rn != nil {
+			old = rn.Content
+		}
+	}
+	if old == "" || store.HashContent(old) == store.HashContent(w.finalContent) {
+		return nil // pure rename: there is nothing to lose
+	}
+	name := w.st.Filename
+	if name == "" {
+		name = w.displayName()
+	}
+	dest, err := store.WriteToTrash(e.cfg.TrashDir, name, old)
+	if err != nil {
+		return err
+	}
+	e.Log("trash  %s (previous version of an inferred rename)", filepath.Base(dest))
 	return nil
 }
 

@@ -185,6 +185,31 @@ func (h *harness) read(t *testing.T, name string) string {
 	return string(b)
 }
 
+// body returns the note body of a local file, checking on the way that the file
+// records the note id it is synced under.
+func (h *harness) body(t *testing.T, name string) string {
+	t.Helper()
+	front, body := store.SplitFrontMatter(store.Normalize(h.read(t, name)))
+	if front != "" && store.FrontMatterID(front) == "" {
+		t.Fatalf("%s: front matter without a note id: %q", name, front)
+	}
+	return body
+}
+
+// noteID returns the note id recorded in a local file's front matter.
+func (h *harness) noteID(t *testing.T, name string) string {
+	t.Helper()
+	front, _ := store.SplitFrontMatter(store.Normalize(h.read(t, name)))
+	return store.FrontMatterID(front)
+}
+
+// withBody replaces the body of a local file, keeping its front matter.
+func (h *harness) keepFrontMatter(t *testing.T, name, body string) string {
+	t.Helper()
+	front, _ := store.SplitFrontMatter(store.Normalize(h.read(t, name)))
+	return front + body
+}
+
 func (h *harness) noteByContent(sub string) (string, simperium.Note) {
 	for id, n := range h.srv.notes {
 		if strings.Contains(n.Content, sub) {
@@ -239,6 +264,205 @@ func TestManualRenameDoesNotDuplicate(t *testing.T) {
 	}
 }
 
+// Renaming a file and editing it in the same step must still update the same
+// note: the front matter's note id identifies it even though the body changed.
+func TestRenameWithEditKeepsTheNote(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "alpha"})
+	h.srv.put("b", simperium.Note{Content: "beta"})
+	h.run(t)
+
+	st := h.stateByServerKey("a")
+	if st == nil {
+		t.Fatal("alpha not pulled")
+	}
+	edited := h.keepFrontMatter(t, st.Filename, "alpha edited")
+	if err := os.Remove(filepath.Join(h.dir, st.Filename)); err != nil {
+		t.Fatal(err)
+	}
+	h.write(t, "renamed.md", edited)
+	h.run(t)
+
+	if len(h.srv.notes) != 2 {
+		t.Fatalf("rename with edit changed the note count: %d", len(h.srv.notes))
+	}
+	if n := h.srv.notes["a"]; n.Deleted || n.Content != "alpha edited" {
+		t.Fatalf("note a was not updated in place: %+v", n)
+	}
+	if n := h.srv.notes["b"]; n.Deleted || n.Content != "beta" {
+		t.Fatalf("note b was disturbed: %+v", n)
+	}
+	if st := h.stateByServerKey("a"); st == nil || st.Filename != "alpha edited.md" {
+		t.Fatalf("state not updated: %+v", st)
+	}
+}
+
+// Files written by older versions (and TOML front matter) carry no note id, so
+// a rename that also edits the body is recognised by the one-to-one pairing:
+// exactly one tracked note lost its file and exactly one file appeared.
+func TestRenameWithEditWithoutNoteID(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "first version"})
+	h.run(t)
+
+	st := h.stateByServerKey("a")
+	if err := os.Remove(filepath.Join(h.dir, st.Filename)); err != nil {
+		t.Fatal(err)
+	}
+	h.write(t, "totally different.md", "second version")
+	h.run(t)
+
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("expected the note to be adopted, got %d notes", len(h.srv.notes))
+	}
+	if n := h.srv.notes["a"]; n.Deleted || n.Content != "second version" {
+		t.Fatalf("note not updated in place: %+v", n)
+	}
+}
+
+// The pairing is a guess, so the body it overwrites must stay recoverable.
+func TestInferredRenameKeepsOverwrittenBody(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "alpha.md", "alpha body")
+	h.run(t)
+
+	id, _ := h.noteByContent("alpha body")
+	st := h.stateByServerKey(id)
+	if err := os.Remove(filepath.Join(h.dir, st.Filename)); err != nil {
+		t.Fatal(err)
+	}
+	h.write(t, "unrelated.md", "unrelated body")
+	h.run(t)
+
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("expected 1 note, got %d", len(h.srv.notes))
+	}
+	if n := h.srv.notes[id]; n.Content != "unrelated body" {
+		t.Fatalf("note was not updated: %+v", n)
+	}
+	trashed, err := os.ReadDir(h.cfg.TrashDir)
+	if err != nil {
+		t.Fatalf("read trash: %v", err)
+	}
+	if len(trashed) != 1 {
+		t.Fatalf("expected the overwritten body in the trash, got %v", trashed)
+	}
+	if got := h.read(t, filepath.Join(".trash", trashed[0].Name())); !strings.Contains(got, "alpha body") {
+		t.Fatalf("trash copy does not hold the old body: %q", got)
+	}
+}
+
+// With more than one note in flight there is nothing to pair, so no guess is
+// made: the missing notes are trashed and the new file becomes a new note.
+func TestAmbiguousRenameIsNotGuessed(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "alpha"})
+	h.srv.put("b", simperium.Note{Content: "beta"})
+	h.run(t)
+
+	for _, key := range []string{"a", "b"} {
+		st := h.stateByServerKey(key)
+		if err := os.Remove(filepath.Join(h.dir, st.Filename)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.write(t, "gamma.md", "gamma")
+	h.run(t)
+
+	if n := h.srv.notes["a"]; !n.Deleted {
+		t.Fatalf("note a should have been trashed: %+v", n)
+	}
+	if n := h.srv.notes["b"]; !n.Deleted {
+		t.Fatalf("note b should have been trashed: %+v", n)
+	}
+	if _, n := h.noteByContent("gamma"); n.Content == "" || n.Deleted {
+		t.Fatalf("the new file was not pushed: %+v", n)
+	}
+}
+
+// Copying a file copies its note id too. The copy must not hijack the original
+// note: it gets its own key, and the stale id is rewritten.
+func TestCopyOfNoteGetsItsOwnID(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "note.md", "shared body")
+	h.run(t)
+
+	id, _ := h.noteByContent("shared body")
+	st := h.stateByServerKey(id)
+	h.write(t, "copy.md", h.read(t, st.Filename))
+	h.run(t)
+
+	if len(h.srv.notes) != 2 {
+		t.Fatalf("copy should become its own note, got %d notes", len(h.srv.notes))
+	}
+	for k, n := range h.srv.notes {
+		if n.Deleted {
+			t.Fatalf("note %s was deleted", k)
+		}
+	}
+	origID := h.noteID(t, "shared body.md")
+	copyID := h.noteID(t, "shared body (2).md")
+	if origID == "" || copyID == "" || origID == copyID {
+		t.Fatalf("ids are not unique: original %q, copy %q", origID, copyID)
+	}
+}
+
+// The id in the file is bookkeeping, not authority: it is rewritten from the
+// state on every pass, so a hand-edited one is repaired instead of trusted.
+func TestNoteIDIsRewrittenFromState(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "x.md", "hello")
+	h.run(t)
+
+	id, _ := h.noteByContent("hello")
+	st := h.stateByServerKey(id)
+	if got := h.noteID(t, st.Filename); got != id {
+		t.Fatalf("file records id %q, want %q", got, id)
+	}
+
+	h.write(t, st.Filename, "---\nsimplenote_id: bogus\n---\nhello")
+	h.run(t)
+
+	if got := h.noteID(t, st.Filename); got != id {
+		t.Fatalf("id not repaired: %q, want %q", got, id)
+	}
+	if len(h.srv.notes) != 1 || h.srv.pushes != 1 {
+		t.Fatalf("repairing the id caused a push: %d pushes, %d notes", h.srv.pushes, len(h.srv.notes))
+	}
+}
+
+// After a lost state file the note id alone is enough to re-adopt a note whose
+// body has changed in the meantime.
+func TestLostStateAdoptsByNoteIDAfterEdit(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "hello.md", "hello world")
+	h.run(t)
+
+	id, _ := h.noteByContent("hello world")
+	st := h.stateByServerKey(id)
+	edited := h.keepFrontMatter(t, st.Filename, "hello edited")
+
+	if err := os.Remove(h.cfg.StateFile); err != nil {
+		t.Fatal(err)
+	}
+	fresh, err := store.LoadState(h.cfg.StateFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.st = fresh
+	h.eng = New(h.cfg, h.eng.sn, fresh)
+	h.eng.Log = t.Logf
+	h.write(t, st.Filename, edited)
+	h.runFull(t)
+
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("lost state duplicated the note: %d notes", len(h.srv.notes))
+	}
+	if n := h.srv.notes[id]; n.Deleted || n.Content != "hello edited" {
+		t.Fatalf("note not updated in place: %+v", n)
+	}
+}
+
 func TestPushNewLocalFile(t *testing.T) {
 	h := newHarness(t)
 	h.write(t, "hello.md", "hello world")
@@ -269,7 +493,7 @@ func TestPullNewRemoteNote(t *testing.T) {
 	h.run(t)
 
 	got := h.read(t, "from the server.md")
-	want := "---\r\ntags:\r\n  - work\r\n---\r\nfrom the server"
+	want := "---\r\nsimplenote_id: abc\r\ntags:\r\n  - work\r\n---\r\nfrom the server"
 	if got != want {
 		t.Fatalf("unexpected file content: %q, want %q", got, want)
 	}
@@ -347,7 +571,7 @@ func TestConflictCreatesCopy(t *testing.T) {
 	h.run(t)
 
 	// The canonical note keeps the remote version.
-	if got := h.read(t, "remote edit.md"); got != "remote edit" {
+	if got := h.body(t, "remote edit.md"); got != "remote edit" {
 		t.Fatalf("canonical note should hold the remote edit, got %q", got)
 	}
 	// The local version survives as a separate note pushed to the server.

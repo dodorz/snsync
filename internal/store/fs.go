@@ -134,6 +134,60 @@ func SetFrontMatterTags(front string, tags []string) string {
 	return "---\n" + strings.Join(out, "\n") + "\n---\n"
 }
 
+// FrontMatterIDKey is the YAML front matter key that records which Simplenote
+// note a file belongs to. Like the rest of the front matter it is local-only
+// bookkeeping and is never uploaded.
+const FrontMatterIDKey = "simplenote_id"
+
+// FrontMatterID returns the note id declared by a YAML front matter block, or
+// "" when there is none. TOML ("+++") blocks are not interpreted, matching
+// FrontMatterTags.
+func FrontMatterID(front string) string {
+	if !strings.HasPrefix(front, "---") {
+		return ""
+	}
+	for _, line := range frontMatterInner(front) {
+		if !strings.HasPrefix(line, FrontMatterIDKey+":") {
+			continue
+		}
+		return unquoteTag(strings.TrimSpace(line[len(FrontMatterIDKey)+1:]))
+	}
+	return ""
+}
+
+// SetFrontMatterID returns front matter with its note id set to id. An empty id
+// removes the key, and the whole block is dropped when nothing is left. TOML
+// blocks are returned unchanged.
+func SetFrontMatterID(front, id string) string {
+	if strings.HasPrefix(front, "+++") {
+		return front
+	}
+	inner := frontMatterInner(front)
+	out := make([]string, 0, len(inner)+1)
+	skipping := false
+	for _, line := range inner {
+		if skipping {
+			trimmed := strings.TrimSpace(line)
+			if line != trimmed || strings.HasPrefix(trimmed, "-") {
+				continue // still part of the old value
+			}
+			skipping = false
+		}
+		if strings.HasPrefix(line, FrontMatterIDKey+":") {
+			skipping = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if id != "" {
+		out = append(out, FrontMatterIDKey+": "+quoteTag(id))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "---\n" + strings.Join(out, "\n") + "\n---\n"
+}
+
 // frontMatterInner returns the lines between the delimiters of front matter.
 func frontMatterInner(front string) []string {
 	if front == "" {
@@ -262,6 +316,28 @@ func ListMarkdown(dir string) ([]string, error) {
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// WriteToTrash writes content into trashDir under name (uniquified like
+// MoveToTrash). It is used to keep a version that is about to be overwritten.
+func WriteToTrash(trashDir, name, content string) (string, error) {
+	if name == "" {
+		name = "note.md"
+	}
+	if err := os.MkdirAll(trashDir, 0o755); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(trashDir, name)
+	for i := 2; ; i++ {
+		if _, err := os.Stat(dest); os.IsNotExist(err) {
+			break
+		}
+		dest = filepath.Join(trashDir, fmt.Sprintf("%s.%d", name, i))
+	}
+	if err := writeAtomic(dest, content); err != nil {
+		return "", err
+	}
+	return dest, nil
 }
 
 // MoveToTrash moves path into trashDir, uniquifying the name if needed.
