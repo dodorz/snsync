@@ -193,9 +193,11 @@ intentional cleanup.
 
 `snsync purge-trash --since 48h` permanently deletes notes that were moved to
 the Simplenote trash within the last 48 hours and leaves older trash alone. It
-scans the remote note index (which can take a while on a large account) so it
-also sees notes trashed by another client, and it is a dry run unless `--yes`
-is given:
+normally uses the deletion times recorded in the state file; when the state has
+no tombstones left (for example after `prune-state`), or when `--remote` is
+given, it scans the full remote index instead, which can take a while on a
+large account but also sees notes trashed by another client. The command is a
+dry run unless `--yes` is given:
 
 ```sh
 ./snsync purge-trash --since 48h              # show how many would be deleted

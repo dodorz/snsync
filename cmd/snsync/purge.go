@@ -23,11 +23,11 @@ type purgeTarget struct {
 // trash and were modified (trashed) within the --since window. Older trash is
 // left untouched.
 //
-// The full index is scanned instead of relying on tombstones in the state
-// file: state only tracks live notes, and a note may have been trashed by
-// another client without ever appearing in a local pass. Without --yes the
-// command only reports what it would do.
-func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOrphans bool) error {
+// The state file usually already lists every trashed note, so the common case
+// needs no network round-trip beyond the deletes themselves. When the state
+// has no tombstones left (for example after `prune-state`), or when --remote is
+// given, the full remote index is scanned instead.
+func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOrphans, forceRemote bool) error {
 	_, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
@@ -42,44 +42,24 @@ func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOr
 	}
 	cutoff := float64(time.Now().Add(-since).Unix())
 
-	fmt.Println("fetching the note index (this can take a while on a large account)...")
-	remotes, _, err := sn.Index("")
-	if err != nil {
-		return err
-	}
-
-	// Content hashes that still have a live note. A trashed note whose content
-	// is not represented anywhere else is kept by default: purging it would
-	// permanently remove the only remaining copy.
-	liveHashes := map[string]bool{}
-	for _, r := range remotes {
-		if !r.Note.Deleted {
-			liveHashes[store.HashContent(r.Note.Content)] = true
-		}
-	}
-
 	var targets []purgeTarget
 	older, orphans := 0, 0
-	for _, r := range remotes {
-		if !r.Note.Deleted {
-			continue
-		}
-		if r.Note.ModificationDate < cutoff {
-			older++
-			continue
-		}
-		h := store.HashContent(r.Note.Content)
-		if !purgeOrphans && !liveHashes[h] {
-			orphans++
-			continue
-		}
-		targets = append(targets, purgeTarget{
-			serverKey: r.ID,
-			hash:      h,
-			label:     noteLabel(r.Note.Content),
-			modTime:   r.Note.ModificationDate,
-		})
+	fromState := !forceRemote
+	if fromState {
+		targets, older, orphans, fromState = collectStateTargets(st, cutoff, purgeOrphans)
 	}
+	if !fromState {
+		fmt.Println("fetching the note index (this can take a while on a large account)...")
+		remotes, _, err := sn.Index("")
+		if err != nil {
+			return err
+		}
+		targets, older, orphans = collectRemoteTargets(remotes, cutoff, purgeOrphans)
+		fmt.Println("source: remote index")
+	} else {
+		fmt.Println("source: state file (use --remote to scan the full index)")
+	}
+
 	sort.Slice(targets, func(i, j int) bool {
 		if targets[i].modTime != targets[j].modTime {
 			return targets[i].modTime < targets[j].modTime
@@ -179,6 +159,85 @@ func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOr
 	return nil
 }
 
+// collectStateTargets uses the tombstones in the state file. The fourth return
+// value reports whether the state had any usable tombstones; when it did not,
+// the caller falls back to the remote index.
+func collectStateTargets(st *store.State, cutoff float64, purgeOrphans bool) ([]purgeTarget, int, int, bool) {
+	liveHashes := map[string]bool{}
+	hasTombstone := false
+	for _, n := range st.Notes {
+		if !n.Deleted {
+			if n.BaseHash != "" {
+				liveHashes[n.BaseHash] = true
+			}
+			continue
+		}
+		if n.ServerKey != "" {
+			hasTombstone = true
+		}
+	}
+	if !hasTombstone {
+		return nil, 0, 0, false
+	}
+
+	var targets []purgeTarget
+	older, orphans := 0, 0
+	for _, n := range st.Notes {
+		if !n.Deleted || n.ServerKey == "" {
+			continue
+		}
+		if n.ModTime < cutoff {
+			older++
+			continue
+		}
+		if !purgeOrphans && (n.BaseHash == "" || !liveHashes[n.BaseHash]) {
+			orphans++
+			continue
+		}
+		targets = append(targets, purgeTarget{
+			serverKey: n.ServerKey,
+			hash:      n.BaseHash,
+			label:     shortHash(n.BaseHash),
+			modTime:   n.ModTime,
+		})
+	}
+	return targets, older, orphans, true
+}
+
+// collectRemoteTargets finds trashed notes in a full index response.
+func collectRemoteTargets(remotes []simperium.RemoteNote, cutoff float64, purgeOrphans bool) ([]purgeTarget, int, int) {
+	liveHashes := map[string]bool{}
+	for _, r := range remotes {
+		if !r.Note.Deleted {
+			liveHashes[store.HashContent(r.Note.Content)] = true
+		}
+	}
+
+	var targets []purgeTarget
+	older, orphans := 0, 0
+	for _, r := range remotes {
+		if !r.Note.Deleted {
+			continue
+		}
+		if r.Note.ModificationDate < cutoff {
+			older++
+			continue
+		}
+		h := store.HashContent(r.Note.Content)
+		if !purgeOrphans && !liveHashes[h] {
+			orphans++
+			continue
+		}
+		targets = append(targets, purgeTarget{
+			serverKey: r.ID,
+			hash:      h,
+			label:     noteLabel(r.Note.Content),
+			modTime:   r.Note.ModificationDate,
+		})
+	}
+	return targets, older, orphans
+}
+
 // noteLabel returns a short, human-readable label for a trashed note.
 func noteLabel(content string) string {
 	for _, line := range strings.Split(content, "\n") {
@@ -192,4 +251,11 @@ func noteLabel(content string) string {
 		return line
 	}
 	return "(empty)"
+}
+
+func shortHash(h string) string {
+	if len(h) > 12 {
+		return h[:12]
+	}
+	return h
 }

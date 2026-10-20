@@ -39,6 +39,11 @@ func TestParseArgs(t *testing.T) {
 			want: options{command: "purge-trash", configPath: defaultConfigPath(), since: 48 * time.Hour, sinceSet: true, jobs: 4},
 		},
 		{
+			name: "purge trash remote scan",
+			args: []string{"purge-trash", "--since", "48h", "--remote"},
+			want: options{command: "purge-trash", configPath: defaultConfigPath(), since: 48 * time.Hour, sinceSet: true, jobs: 4, purgeRemote: true},
+		},
+		{
 			name:    "purge trash without window",
 			args:    []string{"purge-trash"},
 			wantErr: true,

@@ -49,7 +49,7 @@ func main() {
 	case "status":
 		err = runStatus(opts.configPath)
 	case "purge-trash":
-		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans)
+		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans, opts.purgeRemote)
 	case "prune-state":
 		err = runPruneState(opts.configPath, opts.dryRun)
 	case "version":
@@ -94,6 +94,8 @@ type options struct {
 	// purgeOrphans also purges recently trashed notes whose content has no
 	// surviving copy.
 	purgeOrphans bool
+	// purgeRemote scans the full remote index instead of the state tombstones.
+	purgeRemote bool
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -161,6 +163,8 @@ func parseArgs(args []string) (*options, error) {
 			o.yes = true
 		case a == "--purge-orphans" || a == "-purge-orphans":
 			o.purgeOrphans = true
+		case a == "--remote" || a == "-remote":
+			o.purgeRemote = true
 		case a == "--jobs" || a == "-jobs":
 			if i+1 >= len(args) {
 				return nil, fmt.Errorf("%s needs a value", a)
@@ -498,6 +502,8 @@ flags:
       --yes             purge-trash: actually delete (default is a dry run)
       --purge-orphans   purge-trash: also delete recent trash whose content has
                         no surviving live copy (dangerous; default keeps them)
+      --remote          purge-trash: scan the full remote index instead of the
+                        state-file tombstones (slower, sees all clients)
       --jobs <n>        purge-trash: concurrent deletes, 1-16 (default 4)
       --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s or
                         the watch_interval config key)
