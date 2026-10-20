@@ -244,6 +244,59 @@ func TestSecondSyncIsIdempotent(t *testing.T) {
 	}
 }
 
+// A "title" in the front matter names the file, so a rename stays put instead
+// of being undone by the body's first line.
+func TestFrontMatterTitleNamesTheFile(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "scratch.md", "---\ntitle: Meeting notes\n---\nfirst line of the body")
+	h.run(t)
+
+	if _, err := os.Stat(filepath.Join(h.dir, "Meeting notes.md")); err != nil {
+		t.Fatalf("file was not named after the front matter title: %v", err)
+	}
+	if got := h.body(t, "Meeting notes.md"); got != "first line of the body" {
+		t.Fatalf("body = %q", got)
+	}
+
+	// Rename it: the note id brings it back, and the title decides the name.
+	if err := os.Rename(filepath.Join(h.dir, "Meeting notes.md"), filepath.Join(h.dir, "zzz.md")); err != nil {
+		t.Fatal(err)
+	}
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "Meeting notes.md")); err != nil {
+		t.Fatalf("rename reverted to the body title instead of the front matter one: %v", err)
+	}
+	if h.srv.pushes != 1 || len(h.srv.notes) != 1 {
+		t.Fatalf("rename with a title caused a push: %d pushes, %d notes", h.srv.pushes, len(h.srv.notes))
+	}
+
+	// Changing the title renames the file without touching the note.
+	h.write(t, "Meeting notes.md", "---\ntitle: Renamed by title\n---\nfirst line of the body")
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "Renamed by title.md")); err != nil {
+		t.Fatalf("title change did not rename the file: %v", err)
+	}
+	if h.srv.pushes != 1 {
+		t.Fatalf("title change triggered a push: %d pushes", h.srv.pushes)
+	}
+}
+
+// Without a title the file keeps being named after the body, as before.
+func TestFrontMatterWithoutTitleFallsBackToBody(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "scratch.md", "---\ndate: 2020-01-01\n---\nbody title")
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "body title.md")); err != nil {
+		t.Fatalf("file was not named after the body: %v", err)
+	}
+	// An empty title is not a title either.
+	h.write(t, "body title.md", "---\ntitle: \n---\nbody title")
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "body title.md")); err != nil {
+		t.Fatalf("an empty title renamed the file: %v", err)
+	}
+}
+
 func TestManualRenameDoesNotDuplicate(t *testing.T) {
 	h := newHarness(t)
 	h.write(t, "orig.md", "rename me")
@@ -698,9 +751,9 @@ func TestFrontMatterIsLocalOnly(t *testing.T) {
 		t.Fatalf("server content = %q, want the body only", n.Content)
 	}
 
-	// The file is renamed after its (body) title, keeps the front matter and
+	// The file is named after the front matter title, keeps the front matter and
 	// uses CRLF line endings.
-	got := h.read(t, "body text.md")
+	got := h.read(t, "local.md")
 	if !strings.Contains(got, "title: local") {
 		t.Fatalf("front matter was dropped locally: %q", got)
 	}
@@ -712,13 +765,13 @@ func TestFrontMatterIsLocalOnly(t *testing.T) {
 	}
 
 	// Editing only the front matter does not change the note, so nothing is
-	// pushed and the second sync is otherwise a no-op.
-	h.write(t, "body text.md", "---\ntitle: edited\n---\nbody text")
+	// pushed; the title still renames the file.
+	h.write(t, "local.md", "---\ntitle: edited\n---\nbody text")
 	h.run(t)
 	if h.srv.pushes != 1 {
 		t.Fatalf("front matter edit triggered a push: %d pushes", h.srv.pushes)
 	}
-	if got := h.read(t, "body text.md"); !strings.Contains(got, "title: edited") {
+	if got := h.read(t, "edited.md"); !strings.Contains(got, "title: edited") {
 		t.Fatalf("edited front matter was not kept: %q", got)
 	}
 }

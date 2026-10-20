@@ -221,18 +221,19 @@ or is killed; the lock file itself can be left on disk.
 
 ### Files and names
 
-- One `.md` file per note. The file name is derived from the note title (the
-  first non-empty line), so a **manual rename is still undone** on the next
-  sync — change the note's first line instead. What a rename no longer does is
-  split the note in two. The file it moved is matched back to its note in three
-  steps, in decreasing order of confidence: by the `simplenote_id` in its front
-  matter, by an identical body, and — when exactly one file and one note are
-  left unaccounted for — by a plain one-to-one pairing that also covers a
-  rename combined with an edit in the same step. Only that last step is a
-  guess, so the body it overwrites is copied into `.trash/` first. When the
-  guess is not safe to make (several notes lost their file at once) nothing is
-  invented: the missing notes go to Simplenote's trash and the new file becomes
-  a new note, exactly as before.
+- One `.md` file per note. The file name is derived from the note title — its
+  front matter's `title` when the file declares one, otherwise the body's first
+  non-empty line — so a **manual rename is still undone** on the next sync:
+  change one of those two instead. What a rename no longer does is split the
+  note in two. The file it moved is matched back to its note in three steps, in
+  decreasing order of confidence: by the `simplenote_id` in its front matter, by
+  an identical body, and — when exactly one file and one note are left
+  unaccounted for — by a plain one-to-one pairing that also covers a rename
+  combined with an edit in the same step. Only that last step is a guess, so the
+  body it overwrites is copied into `.trash/` first. When the guess is not safe
+  to make (several notes lost their file at once) nothing is invented: the
+  missing notes go to Simplenote's trash and the new file becomes a new note,
+  exactly as before.
 - `snsync` records which Simplenote note each file belongs to in the front
   matter:
 
@@ -261,11 +262,25 @@ or is killed; the lock file itself can be left on disk.
   them in the file pushes the new set to Simplenote, and remote changes are
   written back. The pinned/markdown **system tags** are not written to the file;
   they live in the state file.
+- A file that declares its own `title` keeps that name:
+
+  ```yaml
+  ---
+  title: Meeting notes
+  ---
+  first line of the body
+  ```
+
+  becomes `Meeting notes.md`, and renaming it or editing `title:` renames the
+  file (locally only — like everything in the front matter, the title is never
+  uploaded and Simplenote keeps showing the note's first line). Remove the key
+  and the name follows the body again. YAML only, as with the id.
 - Front matter — a leading `---` (YAML) or `+++` (TOML) block — stays on disk.
-  Apart from `tags` and `simplenote_id`, it is ignored when comparing, hashing
-  and uploading, and is preserved when the file is updated from the server, so
-  it never appears in Simplenote. The note title (and therefore the file name)
-  is taken from the body, not the front matter — a `title:` key is inert.
+  Apart from `tags`, `title` and `simplenote_id`, it is ignored when comparing,
+  hashing and uploading, and is preserved when the file is updated from the
+  server, so it never appears in Simplenote. Only `tags` changing triggers an
+  upload; renaming the file or editing any other front matter key is invisible
+  to the server.
 - Local markdown files are written with **CRLF** (`\r\n`) line endings. Any
   line-ending style is accepted when reading, and existing files are converted
   on the next sync.

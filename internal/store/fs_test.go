@@ -135,6 +135,27 @@ func TestFrontMatterIDComposesWithTags(t *testing.T) {
 	}
 }
 
+func TestFrontMatterTitle(t *testing.T) {
+	cases := []struct {
+		front string
+		title string
+	}{
+		{"", ""},
+		{"---\nsimplenote_id: abc\n---\n", ""},
+		{"---\ntitle: hello\n---\n", "hello"},
+		{"---\ntitle: \"a: b\"\n---\n", "a: b"},
+		{"---\ntitle:\n---\n", ""},
+		// A different key that merely starts the same way is not a title.
+		{"---\ntitles: x\n---\n", ""},
+		{"+++\ntitle = \"hello\"\n+++\n", ""},
+	}
+	for _, tc := range cases {
+		if got := FrontMatterTitle(tc.front); got != tc.title {
+			t.Errorf("FrontMatterTitle(%q) = %q, want %q", tc.front, got, tc.title)
+		}
+	}
+}
+
 func TestEncodeNoteUsesCRLF(t *testing.T) {
 	got := EncodeNote("---\ntitle: x\n---\n", "a\nb")
 	want := "---\r\ntitle: x\r\n---\r\na\r\nb"

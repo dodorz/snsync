@@ -139,21 +139,30 @@ func SetFrontMatterTags(front string, tags []string) string {
 // bookkeeping and is never uploaded.
 const FrontMatterIDKey = "simplenote_id"
 
-// FrontMatterID returns the note id declared by a YAML front matter block, or
-// "" when there is none. TOML ("+++") blocks are not interpreted, matching
-// FrontMatterTags.
-func FrontMatterID(front string) string {
+// frontMatterValue returns the scalar value of a top-level key in a YAML front
+// matter block, or "" when the block or the key is absent. TOML ("+++") blocks
+// are not interpreted, matching FrontMatterTags.
+func frontMatterValue(front, key string) string {
 	if !strings.HasPrefix(front, "---") {
 		return ""
 	}
 	for _, line := range frontMatterInner(front) {
-		if !strings.HasPrefix(line, FrontMatterIDKey+":") {
+		if !strings.HasPrefix(line, key+":") {
 			continue
 		}
-		return unquoteTag(strings.TrimSpace(line[len(FrontMatterIDKey)+1:]))
+		return unquoteTag(strings.TrimSpace(line[len(key)+1:]))
 	}
 	return ""
 }
+
+// FrontMatterID returns the note id declared by a YAML front matter block, or
+// "" when there is none.
+func FrontMatterID(front string) string { return frontMatterValue(front, FrontMatterIDKey) }
+
+// FrontMatterTitle returns the file name the note asked for through its front
+// matter's "title" key, or "" when it declares none. Like the id it is local
+// bookkeeping: Simplenote neither stores nor receives it.
+func FrontMatterTitle(front string) string { return frontMatterValue(front, "title") }
 
 // SetFrontMatterID returns front matter with its note id set to id. An empty id
 // removes the key, and the whole block is dropped when nothing is left. TOML

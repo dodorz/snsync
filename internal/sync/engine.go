@@ -726,6 +726,19 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 	}
 }
 
+// filenameStem is the base name for the note's file: the front matter's "title"
+// when the file declares one, otherwise the body's first line. The front matter
+// is local-only, so a title there is a way to pin a file name that the note's
+// text would not produce — which is also what keeps a renamed file from being
+// renamed back to its body title.
+func (w *work) filenameStem() string {
+	if t := store.FrontMatterTitle(w.localFront); t != "" {
+		return Sanitize(t)
+	}
+	return Sanitize(Title(w.finalContent))
+}
+
+// assignFilenames gives every note that stays on disk its file name.
 func (e *Engine) assignFilenames(works map[string]*work) {
 	type target struct {
 		w    *work
@@ -737,7 +750,7 @@ func (e *Engine) assignFilenames(works map[string]*work) {
 		if w.finalDeleted {
 			continue
 		}
-		stem := Sanitize(Title(w.finalContent))
+		stem := w.filenameStem()
 		if w.conflictCopy {
 			stem += " (conflict)"
 		}
