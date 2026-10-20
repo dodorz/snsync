@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,11 +43,13 @@ func main() {
 	case "login":
 		err = runLogin(opts.configPath, opts.token)
 	case "sync":
-		err = runSync(opts.configPath, opts.dryRun, opts.full)
+		err = runSync(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete)
 	case "watch":
-		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.interval, opts.intervalSet)
+		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete, opts.interval, opts.intervalSet)
 	case "status":
 		err = runStatus(opts.configPath)
+	case "purge-trash":
+		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans)
 	case "version":
 		fmt.Printf("snsync %s\n", version)
 	case "help":
@@ -73,11 +76,22 @@ type options struct {
 	configPath string
 	dryRun     bool
 	full       bool
-	token      string
-	interval   time.Duration
+	// allowMassDelete overrides the safety check that stops a sync from
+	// trashing most of the account when many local files disappeared.
+	allowMassDelete bool
+	token           string
+	interval        time.Duration
 	// intervalSet records whether --interval was given, so the config value can
 	// be used when it was not.
 	intervalSet bool
+	// purge-trash options.
+	since    time.Duration
+	sinceSet bool
+	yes      bool
+	jobs     int
+	// purgeOrphans also purges recently trashed notes whose content has no
+	// surviving copy.
+	purgeOrphans bool
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -123,6 +137,44 @@ func parseArgs(args []string) (*options, error) {
 			o.dryRun = true
 		case a == "-full" || a == "--full":
 			o.full = true
+		case a == "-allow-mass-delete" || a == "--allow-mass-delete":
+			o.allowMassDelete = true
+		case a == "--since" || a == "-since":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			d, err := time.ParseDuration(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("invalid --since: %w", err)
+			}
+			o.since, o.sinceSet = d, true
+		case strings.HasPrefix(a, "--since="):
+			d, err := time.ParseDuration(strings.TrimPrefix(a, "--since="))
+			if err != nil {
+				return nil, fmt.Errorf("invalid --since: %w", err)
+			}
+			o.since, o.sinceSet = d, true
+		case a == "--yes" || a == "-yes":
+			o.yes = true
+		case a == "--purge-orphans" || a == "-purge-orphans":
+			o.purgeOrphans = true
+		case a == "--jobs" || a == "-jobs":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("invalid --jobs: %w", err)
+			}
+			o.jobs = n
+		case strings.HasPrefix(a, "--jobs="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--jobs="))
+			if err != nil {
+				return nil, fmt.Errorf("invalid --jobs: %w", err)
+			}
+			o.jobs = n
 		case a == "-h" || a == "--help":
 			o.command = "help"
 		case a == "-v" || a == "--version":
@@ -140,6 +192,16 @@ func parseArgs(args []string) (*options, error) {
 	case "watch":
 		if o.intervalSet && o.interval <= 0 {
 			return nil, fmt.Errorf("--interval must be positive")
+		}
+	case "purge-trash":
+		if !o.sinceSet || o.since <= 0 {
+			return nil, fmt.Errorf("purge-trash needs a positive --since, e.g. --since 48h")
+		}
+		if o.jobs == 0 {
+			o.jobs = 4
+		}
+		if o.jobs < 1 || o.jobs > 16 {
+			return nil, fmt.Errorf("--jobs must be between 1 and 16")
 		}
 	}
 	return o, nil
@@ -255,7 +317,7 @@ func newClient(cfg *config.Config, token string) *simperium.Client {
 	return sn
 }
 
-func runSync(path string, dry, full bool) error {
+func runSync(path string, dry, full, allowMassDelete bool) error {
 	cfg, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
@@ -263,6 +325,7 @@ func runSync(path string, dry, full bool) error {
 	defer lk.Release()
 	eng := syncpkg.New(cfg, sn, st)
 	eng.Full = full
+	eng.AllowMassDelete = allowMassDelete
 	eng.Log = func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -277,7 +340,7 @@ func runSync(path string, dry, full bool) error {
 	return nil
 }
 
-func runWatch(path string, dry, full bool, interval time.Duration, intervalSet bool) error {
+func runWatch(path string, dry, full, allowMassDelete bool, interval time.Duration, intervalSet bool) error {
 	cfg, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
@@ -291,6 +354,7 @@ func runWatch(path string, dry, full bool, interval time.Duration, intervalSet b
 		}
 	}
 	eng := syncpkg.New(cfg, sn, st)
+	eng.AllowMassDelete = allowMassDelete
 	eng.Log = func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -413,6 +477,8 @@ commands:
   sync      run one reconciliation pass
   watch     keep syncing on an interval until interrupted
   status    show sync state summary
+  purge-trash
+            permanently delete recently trashed notes (older trash is kept)
   version   print the program version
   help      show this message
 
@@ -420,6 +486,15 @@ flags:
   -c, --config <path>   config file (default ~/.config/snsync/config.json)
       --dry-run         show what would happen without writing anything
       --full            force a full reconciliation (ignore the cursor)
+      --allow-mass-delete
+                        allow a sync to trash a large part of the account when
+                        many tracked local files are missing (safety override)
+      --since <dur>     purge-trash: only notes trashed within this window are
+                        purged, e.g. 48h (required)
+      --yes             purge-trash: actually delete (default is a dry run)
+      --purge-orphans   purge-trash: also delete recent trash whose content has
+                        no surviving live copy (dangerous; default keeps them)
+      --jobs <n>        purge-trash: concurrent deletes, 1-16 (default 4)
       --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s or
                         the watch_interval config key)
       --token <value>   save a token obtained elsewhere (login only)

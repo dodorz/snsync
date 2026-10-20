@@ -98,12 +98,19 @@ git tag 0.1.2 && git push origin 0.1.2
 # force a full reconciliation (ignore the incremental cursor)
 ./snsync sync --full
 
+# override the mass-deletion guard after intentionally emptying the folder
+./snsync sync --allow-mass-delete
+
 # keep syncing until interrupted (polls every 60s by default)
 ./snsync watch
 ./snsync watch --interval 90s
 
 # show state
 ./snsync status
+
+# permanently delete notes trashed in the last 48h (dry run first)
+./snsync purge-trash --since 48h
+./snsync purge-trash --since 48h --yes
 ```
 
 Config lives at `~/.config/snsync/config.json` by default; use `-c path` to
@@ -169,7 +176,39 @@ current server state, and the current local file.
 
 Deletions travel in both directions. Nothing is ever hard-deleted: local files
 go to `.trash/`, remote notes get `deleted: true` (Simplenote's own
-trash).
+trash). A local deletion is logged as `trash  <file> (remote)`.
+
+Because a missing local file normally means "delete it remotely", a state file
+that no longer matches the directory (for example after the directory was moved
+or restored from a backup) used to look like a deliberate mass deletion. The
+engine now refuses to propagate **20 or more** local deletions that make up at
+least **25%** of the tracked notes, before anything is written. Restore the
+files if they are still wanted, or re-run with `--allow-mass-delete` for an
+intentional cleanup.
+
+### Emptying recent trash
+
+`snsync purge-trash --since 48h` permanently deletes notes that were moved to
+the Simplenote trash within the last 48 hours and leaves older trash
+alone. It reads the deletion time from the state file, so it does not need a
+full account download. The command is a dry run unless `--yes` is given:
+
+```sh
+./snsync purge-trash --since 48h              # show how many would be deleted
+./snsync purge-trash --since 48h --yes        # delete them for real
+./snsync purge-trash --since 48h --yes --jobs 8
+```
+
+By default a recently trashed note is only purged when its content still
+exists in a live note, so the cleanup cannot permanently remove the only
+remaining copy of something. The dry run reports how many such "orphans" were
+kept; `--purge-orphans` deletes those as well.
+
+Run a successful `sync` first so the state file knows about the latest
+deletions. Hard deletes cannot be undone; a note deleted this way no longer
+appears in Simplenote's trash. Notes already absent from the server (HTTP 404)
+are treated as successfully purged, so an interrupted cleanup can simply be
+re-run.
 
 ### Incremental sync
 

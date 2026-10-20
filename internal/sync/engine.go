@@ -26,7 +26,22 @@ type Engine struct {
 	Log      func(format string, args ...any)
 	Full     bool // force a full reconciliation
 	fullSync bool // whether the current run is a full reconciliation
+
+	// AllowMassDelete permits propagating a large number of local deletions
+	// (for example after deliberately clearing the notes directory). Without
+	// it a sync that would trash most of the account aborts before writing
+	// anything, so a moved/restored directory cannot wipe the remote side.
+	AllowMassDelete bool
 }
+
+const (
+	// massDeleteMin is the smallest number of local deletions that can trip
+	// the guard; small everyday deletions are never blocked.
+	massDeleteMin = 20
+	// massDeletePercent is the share of tracked notes that must be deleted for
+	// the guard to trigger (25%).
+	massDeletePercent = 25
+)
 
 // New builds an engine.
 func New(cfg *config.Config, sn *simperium.Client, st *store.State) *Engine {
@@ -148,6 +163,10 @@ func (e *Engine) Run(dryRun bool) error {
 	e.assignKeys(works)
 
 	ids := sortedIDs(works)
+
+	if err := e.checkMassDeletion(works); err != nil {
+		return err
+	}
 
 	if err := e.applyLocal(works, ids, dryRun); err != nil {
 		return err
@@ -848,6 +867,33 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 	return nil
 }
 
+// checkMassDeletion refuses to propagate a large batch of local deletions.
+// A state file that no longer matches the directory (for example after the
+// directory was moved or restored from a backup) would otherwise trash most of
+// the Simplenote account, one note at a time.
+func (e *Engine) checkMassDeletion(works map[string]*work) error {
+	tracked, deleting := 0, 0
+	for _, w := range works {
+		if w.st == nil || w.st.ServerKey == "" || w.st.Deleted {
+			continue
+		}
+		tracked++
+		if w.pushedDelete {
+			deleting++
+		}
+	}
+	if deleting < massDeleteMin || tracked == 0 || deleting*100/tracked < massDeletePercent {
+		return nil
+	}
+	if e.AllowMassDelete {
+		e.Log("warning: propagating %d local deletions out of %d tracked notes (--allow-mass-delete)", deleting, tracked)
+		return nil
+	}
+	return fmt.Errorf("refusing to delete %d of %d tracked notes because their local files are missing; "+
+		"if this is intentional re-run with --allow-mass-delete, otherwise restore the files first",
+		deleting, tracked)
+}
+
 func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) error {
 	now := float64(time.Now().Unix())
 	for _, id := range ids {
@@ -882,11 +928,21 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			note.CreationDate = w.remote.Note.CreationDate
 		}
 
-		if w.createRemote {
+		if w.finalDeleted {
+			// A local deletion is propagated as a remote trash (deleted=true).
+			// Log it as such instead of calling it a push: a mass cleanup then
+			// looks like what it is.
+			e.Log("trash  %s (remote)", w.displayName())
+		} else if w.createRemote {
 			e.Log("push   %s (new)", w.displayName())
-			if dryRun {
-				continue
-			}
+		} else {
+			e.Log("push   %s (update)", w.displayName())
+		}
+		if dryRun {
+			continue
+		}
+
+		if w.createRemote {
 			// The key was chosen up front (assignKeys) so that the file could
 			// already record it. Save falls back to generating one if it is
 			// empty, so keep whatever it reports.
@@ -901,10 +957,6 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			w.st.Version = 0
 			e.recordProgress(w)
 		} else {
-			e.Log("push   %s (update)", w.displayName())
-			if dryRun {
-				continue
-			}
 			if err := e.keepOverwrittenBody(w); err != nil {
 				return err
 			}

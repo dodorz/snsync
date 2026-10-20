@@ -2,6 +2,7 @@ package sync
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -503,6 +504,57 @@ func TestPullNewRemoteNote(t *testing.T) {
 	}
 	if len(st.Tags) != 1 || st.Tags[0] != "work" {
 		t.Fatalf("tags not preserved: %+v", st.Tags)
+	}
+}
+
+func TestMassLocalDeleteIsRefused(t *testing.T) {
+	h := newHarness(t)
+	const n = massDeleteMin + 5
+	for i := 0; i < n; i++ {
+		h.write(t, fmt.Sprintf("note-%02d.md", i), fmt.Sprintf("content %d", i))
+	}
+	h.run(t)
+	if len(h.srv.notes) != n {
+		t.Fatalf("expected %d notes, got %d", n, len(h.srv.notes))
+	}
+
+	entries, err := os.ReadDir(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".md") {
+			if err := os.Remove(filepath.Join(h.dir, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// The guard must refuse before anything is trashed.
+	err = h.eng.Run(false)
+	if err == nil {
+		t.Fatal("expected the mass deletion guard to abort the sync")
+	}
+	if !strings.Contains(err.Error(), "allow-mass-delete") {
+		t.Fatalf("error should name the override flag: %v", err)
+	}
+	for id, note := range h.srv.notes {
+		if note.Deleted {
+			t.Fatalf("note %s was trashed despite the guard", id)
+		}
+	}
+
+	// The override lets an intentional cleanup proceed.
+	h.eng.AllowMassDelete = true
+	h.run(t)
+	deleted := 0
+	for _, note := range h.srv.notes {
+		if note.Deleted {
+			deleted++
+		}
+	}
+	if deleted != n {
+		t.Fatalf("expected %d trashed notes, got %d", n, deleted)
 	}
 }
 
