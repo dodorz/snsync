@@ -210,6 +210,67 @@ func SetFrontMatterID(front, id string) string {
 	return "---\n" + strings.Join(out, "\n") + "\n---\n"
 }
 
+// FrontMatterPinnedKey is the YAML front matter key that mirrors Simplenote's
+// "pinned" system tag. It is local-only; the pin itself is sent as systemTags.
+const FrontMatterPinnedKey = "pinned"
+
+// FrontMatterPinned returns the pin state declared by a YAML front matter
+// block. ok reports whether the key was present with a recognised value;
+// callers that treat a missing key as false can ignore it. TOML ("+++") blocks
+// are not interpreted, matching the other front matter helpers.
+func FrontMatterPinned(front string) (pinned, ok bool) {
+	if !strings.HasPrefix(front, "---") {
+		return false, false
+	}
+	for _, line := range frontMatterInner(front) {
+		if !strings.HasPrefix(line, FrontMatterPinnedKey+":") {
+			continue
+		}
+		v := strings.ToLower(unquoteTag(strings.TrimSpace(line[len(FrontMatterPinnedKey)+1:])))
+		switch v {
+		case "true", "yes", "on", "1":
+			return true, true
+		case "false", "no", "off", "0":
+			return false, true
+		}
+		return false, false
+	}
+	return false, false
+}
+
+// SetFrontMatterPinned returns front matter with its "pinned" key set to true,
+// or removed when pinned is false. The whole block is dropped when nothing is
+// left. TOML blocks are returned unchanged.
+func SetFrontMatterPinned(front string, pinned bool) string {
+	if strings.HasPrefix(front, "+++") {
+		return front
+	}
+	inner := frontMatterInner(front)
+	out := make([]string, 0, len(inner)+1)
+	skipping := false
+	for _, line := range inner {
+		if skipping {
+			trimmed := strings.TrimSpace(line)
+			if line != trimmed || strings.HasPrefix(trimmed, "-") {
+				continue // still part of the old value
+			}
+			skipping = false
+		}
+		if strings.HasPrefix(line, FrontMatterPinnedKey+":") {
+			skipping = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if pinned {
+		out = append(out, FrontMatterPinnedKey+": true")
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "---\n" + strings.Join(out, "\n") + "\n---\n"
+}
+
 // frontMatterInner returns the lines between the delimiters of front matter.
 func frontMatterInner(front string) []string {
 	if front == "" {

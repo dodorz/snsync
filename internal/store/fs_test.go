@@ -158,6 +158,70 @@ func TestFrontMatterIDComposesWithTags(t *testing.T) {
 	}
 }
 
+func TestFrontMatterPinned(t *testing.T) {
+	cases := []struct {
+		front  string
+		pinned bool
+		ok     bool
+	}{
+		{"", false, false},
+		{"---\ntitle: x\n---\n", false, false},
+		{"---\npinned: true\n---\n", true, true},
+		{"---\npinned: false\n---\n", false, true},
+		{"---\npinned: yes\n---\n", true, true},
+		{"---\npinned: \"true\"\n---\n", true, true},
+		{"---\npinned:\n---\n", false, false},
+		// TOML blocks are not interpreted, like the other helpers.
+		{"+++\npinned = true\n+++\n", false, false},
+	}
+	for _, tc := range cases {
+		pinned, ok := FrontMatterPinned(tc.front)
+		if pinned != tc.pinned || ok != tc.ok {
+			t.Errorf("FrontMatterPinned(%q) = (%v, %v), want (%v, %v)",
+				tc.front, pinned, ok, tc.pinned, tc.ok)
+		}
+	}
+}
+
+func TestSetFrontMatterPinned(t *testing.T) {
+	cases := []struct {
+		front  string
+		pinned bool
+		want   string
+	}{
+		{"", true, "---\npinned: true\n---\n"},
+		{"---\ntitle: x\n---\n", true, "---\ntitle: x\npinned: true\n---\n"},
+		{"---\ntitle: x\npinned: true\n---\n", false, "---\ntitle: x\n---\n"},
+		// Removing the only key drops the whole block.
+		{"---\npinned: true\n---\n", false, ""},
+		{"", false, ""},
+		{"+++\nx = 1\n+++\n", true, "+++\nx = 1\n+++\n"},
+	}
+	for _, tc := range cases {
+		if got := SetFrontMatterPinned(tc.front, tc.pinned); got != tc.want {
+			t.Errorf("SetFrontMatterPinned(%q, %v) = %q, want %q", tc.front, tc.pinned, got, tc.want)
+		}
+	}
+}
+
+// applyLocal runs id, tags and pinned in that order; doing it twice must be
+// stable, otherwise every sync would rewrite every file.
+func TestFrontMatterPinnedComposes(t *testing.T) {
+	build := func(front string) string {
+		front = SetFrontMatterID(front, "abc")
+		front = SetFrontMatterTags(front, []string{"a"})
+		return SetFrontMatterPinned(front, true)
+	}
+	got := build("---\ntitle: x\n---\n")
+	want := "---\ntitle: x\nsimplenote_id: abc\ntags:\n  - a\npinned: true\n---\n"
+	if got != want {
+		t.Fatalf("first pass = %q, want %q", got, want)
+	}
+	if again := build(got); again != got {
+		t.Fatalf("second pass is not stable: %q -> %q", got, again)
+	}
+}
+
 func TestEncodeNoteUsesCRLF(t *testing.T) {
 	got := EncodeNote("---\ntitle: x\n---\n", "a\nb")
 	want := "---\r\ntitle: x\r\n---\r\na\r\nb"

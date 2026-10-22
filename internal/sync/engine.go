@@ -68,8 +68,12 @@ type work struct {
 	localTitleSet bool // whether the front matter has an explicit "title" key
 	localTags     []string
 	localTagsSet  bool // whether the front matter has an explicit "tags" key
-	localHash     string
-	localFilename string
+	localPinned   bool // absent "pinned" means false
+	// localPinnedKnown is false for TOML ("+++") front matter, which is never
+	// rewritten, so its pin is left to the server instead of being unpinned.
+	localPinnedKnown bool
+	localHash        string
+	localFilename    string
 	// decision
 	finalContent    string
 	finalTags       []string
@@ -113,15 +117,17 @@ func (w *work) noteID() string {
 // localFile is a markdown file on disk that no state entry claims yet. It is
 // either a manual rename of a tracked note or a brand new note.
 type localFile struct {
-	name     string
-	front    string
-	body     string
-	title    string
-	titleSet bool
-	tags     []string
-	tagsSet  bool
-	hash     string
-	id       string // front matter note id, empty when absent
+	name        string
+	front       string
+	body        string
+	title       string
+	titleSet    bool
+	tags        []string
+	tagsSet     bool
+	pinned      bool // absent "pinned" means false
+	pinnedKnown bool
+	hash        string
+	id          string // front matter note id, empty when absent
 }
 
 // Run executes one full sync pass. When dryRun is set nothing is written.
@@ -246,12 +252,15 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		front, body := store.SplitFrontMatter(full)
 		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
+		pinned, _ := store.FrontMatterPinned(front)
 		w.localExists = true
 		w.localFront = front
 		w.localTitle = title
 		w.localTitleSet = titleSet
 		w.localTags = tags
 		w.localTagsSet = tagsSet
+		w.localPinned = pinned
+		w.localPinnedKnown = !strings.HasPrefix(front, "+++")
 		w.localContent = body
 		w.localHash = store.HashContent(body)
 		w.localFilename = w.st.Filename
@@ -323,10 +332,12 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		front, body := store.SplitFrontMatter(full)
 		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
+		pinned, _ := store.FrontMatterPinned(front)
 		strays = append(strays, &localFile{
 			name: name, front: front, body: body,
 			title: title, titleSet: titleSet,
 			tags: tags, tagsSet: tagsSet,
+			pinned: pinned, pinnedKnown: !strings.HasPrefix(front, "+++"),
 			hash: store.HashContent(body),
 			id:   store.FrontMatterID(front),
 		})
@@ -416,17 +427,19 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 	for _, f := range rest {
 		id := "local:" + localHex(8)
 		works[id] = &work{
-			id:            id,
-			st:            &store.NoteState{ID: id},
-			localExists:   true,
-			localFront:    f.front,
-			localTitle:    f.title,
-			localTitleSet: f.titleSet,
-			localTags:     f.tags,
-			localTagsSet:  f.tagsSet,
-			localContent:  f.body,
-			localHash:     f.hash,
-			localFilename: f.name,
+			id:               id,
+			st:               &store.NoteState{ID: id},
+			localExists:      true,
+			localFront:       f.front,
+			localTitle:       f.title,
+			localTitleSet:    f.titleSet,
+			localTags:        f.tags,
+			localTagsSet:     f.tagsSet,
+			localPinned:      f.pinned,
+			localPinnedKnown: f.pinnedKnown,
+			localContent:     f.body,
+			localHash:        f.hash,
+			localFilename:    f.name,
 		}
 	}
 
@@ -463,6 +476,8 @@ func (e *Engine) adoptRename(w *work, f *localFile, how string) {
 	w.localTitleSet = f.titleSet
 	w.localTags = f.tags
 	w.localTagsSet = f.tagsSet
+	w.localPinned = f.pinned
+	w.localPinnedKnown = f.pinnedKnown
 	w.localContent = f.body
 	w.localHash = f.hash
 	w.localFilename = f.name
@@ -483,17 +498,19 @@ func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simpe
 			ID: remoteID, ServerKey: remoteID, BaseHash: store.HashContent(r.Note.Content),
 			Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
 		},
-		remote:        &r,
-		remoteExists:  true,
-		localExists:   true,
-		localFront:    f.front,
-		localTitle:    f.title,
-		localTitleSet: f.titleSet,
-		localTags:     f.tags,
-		localTagsSet:  f.tagsSet,
-		localContent:  f.body,
-		localHash:     f.hash,
-		localFilename: f.name,
+		remote:           &r,
+		remoteExists:     true,
+		localExists:      true,
+		localFront:       f.front,
+		localTitle:       f.title,
+		localTitleSet:    f.titleSet,
+		localTags:        f.tags,
+		localTagsSet:     f.tagsSet,
+		localPinned:      f.pinned,
+		localPinnedKnown: f.pinnedKnown,
+		localContent:     f.body,
+		localHash:        f.hash,
+		localFilename:    f.name,
 	}
 	works[remoteID] = w
 	e.Log("adopt  %s (existing note %s)", f.name, remoteID)
@@ -549,13 +566,13 @@ func (e *Engine) decide(w *work) {
 		}
 		w.finalContent = w.localContent
 		w.finalTags = w.tags()
-		w.finalSystemTags = w.st.SystemTags
+		w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 		w.createRemote = true
 		return
 	}
 
 	localContentChanged := w.localExists && w.localHash != baseHash
-	localChanged := localContentChanged || w.tagsChanged()
+	localChanged := localContentChanged || w.tagsChanged() || w.pinnedChanged()
 	localDeleted := !w.localExists
 	remoteContentChanged := w.remoteExists && !remoteDeleted && remoteHash != baseHash
 	remoteMetaChanged := w.remoteExists &&
@@ -584,7 +601,7 @@ func (e *Engine) decide(w *work) {
 				// merge the tags before pushing them back.
 				w.finalContent = w.remote.Note.Content
 				w.finalTags = mergeTags(w.tags(), w.remote.Note.Tags)
-				w.finalSystemTags = w.remote.Note.SystemTags
+				w.finalSystemTags = w.withLocalPin(w.remote.Note.SystemTags)
 				w.writeLocal = true
 				w.updateRemote = true
 			case !remoteContentChanged:
@@ -592,7 +609,7 @@ func (e *Engine) decide(w *work) {
 				// merge the tags before pushing them back.
 				w.finalContent = w.localContent
 				w.finalTags = mergeTags(w.tags(), w.remote.Note.Tags)
-				w.finalSystemTags = w.remote.Note.SystemTags
+				w.finalSystemTags = w.withLocalPin(w.remote.Note.SystemTags)
 				w.updateRemote = true
 			default:
 				w.isConflict = true
@@ -620,7 +637,7 @@ func (e *Engine) decide(w *work) {
 			// Edited locally after remote deletion: keep it as a new note.
 			w.finalContent = w.localContent
 			w.finalTags = w.tags()
-			w.finalSystemTags = w.st.SystemTags
+			w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 			w.createRemote = true
 		default:
 			w.finalDeleted = true
@@ -634,7 +651,7 @@ func (e *Engine) decide(w *work) {
 			case localChanged:
 				w.finalContent = w.localContent
 				w.finalTags = w.tags()
-				w.finalSystemTags = w.st.SystemTags
+				w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 				w.createRemote = true
 			default:
 				w.finalDeleted = true
@@ -645,7 +662,7 @@ func (e *Engine) decide(w *work) {
 		} else {
 			w.finalContent = w.localContent
 			w.finalTags = w.tags()
-			w.finalSystemTags = w.st.SystemTags
+			w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 			w.createRemote = true
 		}
 	}
@@ -664,7 +681,7 @@ func (w *work) pull() {
 func (w *work) pushLocal() {
 	w.finalContent = w.localContent
 	w.finalTags = w.tags()
-	w.finalSystemTags = w.st.SystemTags
+	w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 	w.updateRemote = true
 }
 
@@ -684,6 +701,22 @@ func (w *work) tags() []string {
 // tagsChanged reports whether the file's tags differ from the last synced tags.
 func (w *work) tagsChanged() bool {
 	return w.localExists && w.localTagsSet && w.st != nil && !equalStrings(w.localTags, w.st.Tags)
+}
+
+// pinnedChanged reports whether the file's pin differs from the last synced
+// "pinned" system tag. A missing "pinned" key counts as false.
+func (w *work) pinnedChanged() bool {
+	return w.localExists && w.localPinnedKnown && w.st != nil &&
+		w.localPinned != containsString(w.st.SystemTags, "pinned")
+}
+
+// withLocalPin applies the file's pin setting on top of base. A missing
+// "pinned" key means false, so removing the key unpins.
+func (w *work) withLocalPin(base []string) []string {
+	if !w.localPinnedKnown {
+		return base
+	}
+	return applyPinned(base, w.localPinned)
 }
 
 // mergeTags returns the union of a and b, keeping the order of a first.
@@ -708,15 +741,15 @@ func (w *work) decideLocalOnly() {
 		// Remote is still trashed but a local file exists again: re-create it.
 		w.finalContent = w.localContent
 		w.finalTags = w.tags()
-		w.finalSystemTags = w.st.SystemTags
+		w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 		w.createRemote = true
-	case w.localExists && (w.localHash != w.st.BaseHash || w.tagsChanged()):
+	case w.localExists && (w.localHash != w.st.BaseHash || w.tagsChanged() || w.pinnedChanged()):
 		w.pushLocal()
 	case w.localExists:
 		// Unchanged; keep the file and the recorded base hash.
 		w.finalContent = w.localContent
 		w.finalTags = w.tags()
-		w.finalSystemTags = w.st.SystemTags
+		w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 		w.preserveBase = true
 	default:
 		// Local file removed: propagate the deletion.
@@ -741,20 +774,22 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 	for _, w := range conflicts {
 		id := "local:" + localHex(8)
 		cw := &work{
-			id:              id,
-			st:              &store.NoteState{ID: id},
-			localFront:      w.localFront,
-			localTitle:      w.localTitle,
-			localTitleSet:   w.localTitleSet,
-			localTags:       w.localTags,
-			localTagsSet:    w.localTagsSet,
-			localContent:    w.localContent,
-			localHash:       w.localHash,
-			finalContent:    w.localContent,
-			finalTags:       w.tags(),
-			finalSystemTags: w.st.SystemTags,
-			conflictCopy:    true,
-			createRemote:    true,
+			id:               id,
+			st:               &store.NoteState{ID: id},
+			localFront:       w.localFront,
+			localTitle:       w.localTitle,
+			localTitleSet:    w.localTitleSet,
+			localTags:        w.localTags,
+			localTagsSet:     w.localTagsSet,
+			localPinned:      w.localPinned,
+			localPinnedKnown: w.localPinnedKnown,
+			localContent:     w.localContent,
+			localHash:        w.localHash,
+			finalContent:     w.localContent,
+			finalTags:        w.tags(),
+			finalSystemTags:  w.withLocalPin(w.st.SystemTags),
+			conflictCopy:     true,
+			createRemote:     true,
 		}
 		e.Log("conflict on %q: keeping local copy", w.st.Filename)
 		works[id] = cw
@@ -865,6 +900,7 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		// every pass, so a hand-edited or copied id is corrected here.
 		front := store.SetFrontMatterID(w.localFront, w.noteID())
 		front = store.SetFrontMatterTags(front, w.finalTags)
+		front = store.SetFrontMatterPinned(front, containsString(w.finalSystemTags, "pinned"))
 		if oldPath != "" && oldPath != target && store.Exists(oldPath) {
 			e.Log("rename %s -> %s", w.localFilename, w.finalFilename)
 			if !dryRun {
@@ -1160,6 +1196,33 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// applyPinned returns systemTags with the "pinned" entry set or cleared. It
+// reuses the input when nothing needs to change, keeping the order stable.
+func applyPinned(systemTags []string, pinned bool) []string {
+	if containsString(systemTags, "pinned") == pinned {
+		return systemTags
+	}
+	out := make([]string, 0, len(systemTags)+1)
+	for _, t := range systemTags {
+		if t != "pinned" {
+			out = append(out, t)
+		}
+	}
+	if pinned {
+		out = append(out, "pinned")
+	}
+	return out
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func localHex(n int) string {

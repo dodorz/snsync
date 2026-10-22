@@ -317,10 +317,19 @@ or is killed; the lock file itself can be left on disk.
 
   An inline list (`tags: [work, home]`) is also accepted when reading. Editing
   them in the file pushes the new set to Simplenote, and remote changes are
-  written back. The pinned/markdown **system tags** are not written to the file;
-  they live in the state file.
+  written back.
+- Pinning is mirrored as `pinned: true` in the front matter:
+
+  ```yaml
+  pinned: true
+  ```
+
+  A missing key means `false`, so deleting the line (or setting it to `false`)
+  unpins on the next sync. This is YAML-only: files with `+++` (TOML) front
+  matter keep the server's pin. The `markdown` system tag is still kept only in
+  the state file.
 - Front matter — a leading `---` (YAML) or `+++` (TOML) block — stays on disk.
-  Apart from `title`, `tags` and `simplenote_id`, it is ignored when comparing,
+  Apart from `title`, `tags`, `pinned` and `simplenote_id`, it is ignored when comparing,
   hashing and uploading, and is preserved when the file is updated from the
   server, so it never appears in Simplenote. A YAML `title:` key overrides the
   file name; the body's first non-empty line is the fallback. It is not sent to

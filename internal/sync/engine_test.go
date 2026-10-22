@@ -494,7 +494,7 @@ func TestPullNewRemoteNote(t *testing.T) {
 	h.run(t)
 
 	got := h.read(t, "from the server.md")
-	want := "---\r\nsimplenote_id: abc\r\ntags:\r\n  - work\r\n---\r\nfrom the server"
+	want := "---\r\nsimplenote_id: abc\r\ntags:\r\n  - work\r\npinned: true\r\n---\r\nfrom the server"
 	if got != want {
 		t.Fatalf("unexpected file content: %q, want %q", got, want)
 	}
@@ -504,6 +504,9 @@ func TestPullNewRemoteNote(t *testing.T) {
 	}
 	if len(st.Tags) != 1 || st.Tags[0] != "work" {
 		t.Fatalf("tags not preserved: %+v", st.Tags)
+	}
+	if !containsString(st.SystemTags, "pinned") {
+		t.Fatalf("pin not preserved in state: %+v", st.SystemTags)
 	}
 }
 
@@ -872,6 +875,39 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 	h.run(t)
 	if got := h.read(t, "tagged note.md"); !strings.Contains(got, "tags:\r\n  - remote") {
 		t.Fatalf("remote tags not written to front matter: %q", got)
+	}
+}
+
+func TestPinnedFrontMatter(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned"}})
+	h.run(t)
+
+	// A remote pin is written to the file.
+	got := h.read(t, "pinned note.md")
+	if !strings.Contains(got, "pinned: true") {
+		t.Fatalf("remote pin not written to front matter: %q", got)
+	}
+
+	// A missing "pinned" key means false, so deleting it unpins.
+	h.write(t, "pinned note.md", "pinned note")
+	h.run(t)
+	if _, n := h.noteByContent("pinned note"); containsString(n.SystemTags, "pinned") {
+		t.Fatalf("deleting pinned did not unpin: %v", n.SystemTags)
+	}
+
+	// Pinning locally pushes it again.
+	h.write(t, "pinned note.md", "---\npinned: true\n---\npinned note")
+	h.run(t)
+	if _, n := h.noteByContent("pinned note"); !containsString(n.SystemTags, "pinned") {
+		t.Fatalf("local pin not pushed: %v", n.SystemTags)
+	}
+
+	// A remote unpin is reflected in the file.
+	h.srv.put("a", simperium.Note{Content: "pinned note"})
+	h.run(t)
+	if got := h.read(t, "pinned note.md"); strings.Contains(got, "pinned:") {
+		t.Fatalf("remote unpin not reflected in front matter: %q", got)
 	}
 }
 
