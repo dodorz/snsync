@@ -26,14 +26,14 @@ as a `.7z` archive containing `snsync.exe` and `README.md`:
 
 ```sh
 # Linux / macOS
-VERSION=0.1.3
+VERSION=0.1.8
 curl -L -o snsync "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-linux-amd64"
 chmod +x snsync
 ```
 
 ```powershell
 # Windows
-$VERSION = '0.1.3'
+$VERSION = '0.1.8'
 curl.exe -L -o snsync.7z "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-windows-amd64.7z"
 7z x snsync.7z
 ```
@@ -77,7 +77,7 @@ binaries for Linux, macOS and Windows (amd64 + arm64), writes a
 `checksums.txt`, and attaches everything to the GitHub Release for that tag.
 
 ```sh
-git tag 0.1.2 && git push origin 0.1.2
+git tag 0.1.8 && git push origin 0.1.8
 ```
 
 ## Usage
