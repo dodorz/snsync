@@ -48,6 +48,8 @@ func main() {
 		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete, opts.interval, opts.intervalSet)
 	case "status":
 		err = runStatus(opts.configPath)
+	case "rename":
+		err = runRename(opts.configPath, opts.dryRun)
 	case "purge-trash":
 		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans, opts.purgeRemote)
 	case "prune-state":
@@ -419,6 +421,82 @@ func runStatus(path string) error {
 	return nil
 }
 
+// runRename renames local files to match the sync naming rule (front matter
+// "title", falling back to the body's first line) without touching the server.
+func runRename(path string, dryRun bool) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if cfg.LocalDir == "" {
+		return fmt.Errorf("config: local_dir is required")
+	}
+	if !dryRun {
+		if cfg.StateFile == "" {
+			return fmt.Errorf("local_dir is required to locate the state file")
+		}
+		lk, err := lock.Acquire(cfg.StateFile + ".lock")
+		if err != nil {
+			return err
+		}
+		defer lk.Release()
+	}
+
+	renames, err := syncpkg.PlanLocalRenames(cfg.LocalDir)
+	if err != nil {
+		return err
+	}
+	if len(renames) == 0 {
+		fmt.Println("no renames needed")
+		return nil
+	}
+	for _, r := range renames {
+		fmt.Printf("rename %s -> %s\n", r.From, r.To)
+	}
+	if dryRun {
+		fmt.Printf("dry run: %d file(s) would be renamed\n", len(renames))
+		return nil
+	}
+	if err := syncpkg.ApplyLocalRenames(cfg.LocalDir, renames); err != nil {
+		return err
+	}
+	if err := updateStateFilenames(cfg.StateFile, renames); err != nil {
+		return err
+	}
+	fmt.Printf("renamed %d file(s)\n", len(renames))
+	return nil
+}
+
+// updateStateFilenames keeps the state file in step with renamed local files,
+// so the next sync finds them without going through rename detection.
+func updateStateFilenames(path string, renames []syncpkg.Rename) error {
+	if path == "" {
+		return nil
+	}
+	st, err := store.LoadState(path)
+	if err != nil {
+		return err
+	}
+	if len(st.Notes) == 0 {
+		return nil
+	}
+	byOld := make(map[string]string, len(renames))
+	for _, r := range renames {
+		byOld[r.From] = r.To
+	}
+	changed := false
+	for _, ns := range st.Notes {
+		if to, ok := byOld[ns.Filename]; ok {
+			ns.Filename = to
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return st.Save()
+}
+
 // loadLocked loads the config and state while holding the per-state-directory
 // lock. The caller must release the returned lock when it is finished.
 func loadLocked(path string) (*config.Config, *simperium.Client, *store.State, *lock.Lock, error) {
@@ -483,6 +561,7 @@ commands:
   sync      run one reconciliation pass
   watch     keep syncing on an interval until interrupted
   status    show sync state summary
+  rename    rename local files to match the sync naming rule (no server)
   purge-trash
             permanently delete recently trashed notes (older trash is kept)
   prune-state

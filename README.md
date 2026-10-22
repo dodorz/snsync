@@ -108,6 +108,10 @@ git tag 0.1.2 && git push origin 0.1.2
 # show state
 ./snsync status
 
+# rename local files to the sync naming rule (front matter title / first line)
+./snsync rename --dry-run
+./snsync rename
+
 # permanently delete notes trashed in the last 48h (dry run first)
 ./snsync purge-trash --since 48h
 ./snsync purge-trash --since 48h --yes
@@ -284,7 +288,9 @@ or is killed; the lock file itself can be left on disk.
   guess, so the body it overwrites is copied into `.trash/` first. When the
   guess is not safe to make (several notes lost their file at once) nothing is
   invented: the missing notes go to Simplenote's trash and the new file becomes
-  a new note, exactly as before.
+  a new note, exactly as before. Run `snsync rename` to apply the naming rule to
+  existing files without contacting the server (`--dry-run` previews it); it
+  also updates the state file, so the next sync sees no renames.
 - `snsync` records which Simplenote note each file belongs to in the front
   matter:
 
