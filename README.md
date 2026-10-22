@@ -272,10 +272,11 @@ or is killed; the lock file itself can be left on disk.
 
 ### Files and names
 
-- One `.md` file per note. The file name is derived from the note title (the
-  first non-empty line), so a **manual rename is still undone** on the next
-  sync — change the note's first line instead. What a rename no longer does is
-  split the note in two. The file it moved is matched back to its note in three
+- One `.md` file per note. The file name comes from the front matter's `title`
+  key when present, otherwise from the first non-empty line of the body. A
+  **manual rename is still undone** on the next sync — change the `title` field
+  (or the note's first line) instead. What a rename no longer does is split the
+  note in two. The file it moved is matched back to its note in three
   steps, in decreasing order of confidence: by the `simplenote_id` in its front
   matter, by an identical body, and — when exactly one file and one note are
   left unaccounted for — by a plain one-to-one pairing that also covers a
@@ -313,10 +314,11 @@ or is killed; the lock file itself can be left on disk.
   written back. The pinned/markdown **system tags** are not written to the file;
   they live in the state file.
 - Front matter — a leading `---` (YAML) or `+++` (TOML) block — stays on disk.
-  Apart from `tags` and `simplenote_id`, it is ignored when comparing, hashing
-  and uploading, and is preserved when the file is updated from the server, so
-  it never appears in Simplenote. The note title (and therefore the file name)
-  is taken from the body, not the front matter — a `title:` key is inert.
+  Apart from `title`, `tags` and `simplenote_id`, it is ignored when comparing,
+  hashing and uploading, and is preserved when the file is updated from the
+  server, so it never appears in Simplenote. A YAML `title:` key overrides the
+  file name; the body's first non-empty line is the fallback. It is not sent to
+  Simplenote, whose own title remains the first line of the body.
 - Local markdown files are written with **CRLF** (`\r\n`) line endings. Any
   line-ending style is accepted when reading, and existing files are converted
   on the next sync.

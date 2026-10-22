@@ -97,6 +97,29 @@ func TestFrontMatterID(t *testing.T) {
 	}
 }
 
+func TestFrontMatterTitle(t *testing.T) {
+	cases := []struct {
+		front string
+		title string
+		ok    bool
+	}{
+		{"", "", false},
+		{"---\ntags: [a]\n---\n", "", false},
+		{"---\ntitle: My Note\n---\n", "My Note", true},
+		{"---\ntitle: \"My: Note\"\n---\n", "My: Note", true},
+		{"---\ntitle:\n---\n", "", false},
+		// TOML blocks are not interpreted, like the other helpers.
+		{"+++\ntitle = \"x\"\n+++\n", "", false},
+	}
+	for _, tc := range cases {
+		title, ok := FrontMatterTitle(tc.front)
+		if title != tc.title || ok != tc.ok {
+			t.Errorf("FrontMatterTitle(%q) = (%q, %v), want (%q, %v)",
+				tc.front, title, ok, tc.title, tc.ok)
+		}
+	}
+}
+
 func TestSetFrontMatterID(t *testing.T) {
 	cases := []struct {
 		front string

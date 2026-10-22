@@ -155,6 +155,28 @@ func FrontMatterID(front string) string {
 	return ""
 }
 
+// FrontMatterTitleKey is the YAML front matter key that overrides the file name.
+// Like the other front matter keys it is local-only and never uploaded.
+const FrontMatterTitleKey = "title"
+
+// FrontMatterTitle returns the title declared by a YAML front matter block. ok
+// is false when the key is absent or empty, so callers fall back to the body's
+// first line. TOML ("+++") blocks are not interpreted, matching the other
+// front matter helpers.
+func FrontMatterTitle(front string) (string, bool) {
+	if !strings.HasPrefix(front, "---") {
+		return "", false
+	}
+	for _, line := range frontMatterInner(front) {
+		if !strings.HasPrefix(line, FrontMatterTitleKey+":") {
+			continue
+		}
+		title := unquoteTag(strings.TrimSpace(line[len(FrontMatterTitleKey)+1:]))
+		return title, title != ""
+	}
+	return "", false
+}
+
 // SetFrontMatterID returns front matter with its note id set to id. An empty id
 // removes the key, and the whole block is dropped when nothing is left. TOML
 // blocks are returned unchanged.

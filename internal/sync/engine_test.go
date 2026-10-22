@@ -756,14 +756,14 @@ func TestPeriodicFullSync(t *testing.T) {
 
 func TestFrontMatterIsLocalOnly(t *testing.T) {
 	h := newHarness(t)
-	h.write(t, "note.md", "---\ntitle: local\n---\nbody text")
+	h.write(t, "note.md", "---\nsource: local\n---\nbody text")
 	h.run(t)
 
 	id, n := h.noteByContent("body text")
 	if id == "" {
 		t.Fatal("note body was not pushed")
 	}
-	if strings.Contains(n.Content, "title: local") {
+	if strings.Contains(n.Content, "source: local") {
 		t.Fatalf("front matter leaked to the server: %q", n.Content)
 	}
 	if n.Content != "body text" {
@@ -773,7 +773,7 @@ func TestFrontMatterIsLocalOnly(t *testing.T) {
 	// The file is renamed after its (body) title, keeps the front matter and
 	// uses CRLF line endings.
 	got := h.read(t, "body text.md")
-	if !strings.Contains(got, "title: local") {
+	if !strings.Contains(got, "source: local") {
 		t.Fatalf("front matter was dropped locally: %q", got)
 	}
 	if !strings.HasPrefix(got, "---\r\n") || !strings.Contains(got, "\r\nbody text") {
@@ -785,13 +785,41 @@ func TestFrontMatterIsLocalOnly(t *testing.T) {
 
 	// Editing only the front matter does not change the note, so nothing is
 	// pushed and the second sync is otherwise a no-op.
-	h.write(t, "body text.md", "---\ntitle: edited\n---\nbody text")
+	h.write(t, "body text.md", "---\nsource: edited\n---\nbody text")
 	h.run(t)
 	if h.srv.pushes != 1 {
 		t.Fatalf("front matter edit triggered a push: %d pushes", h.srv.pushes)
 	}
-	if got := h.read(t, "body text.md"); !strings.Contains(got, "title: edited") {
+	if got := h.read(t, "body text.md"); !strings.Contains(got, "source: edited") {
 		t.Fatalf("edited front matter was not kept: %q", got)
+	}
+}
+
+func TestFrontMatterTitleControlsFilename(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "note.md", "---\ntitle: My Custom Name\n---\nbody first line")
+	h.run(t)
+
+	// The file is named from the front matter title, not the body.
+	if _, err := os.Stat(filepath.Join(h.dir, "My Custom Name.md")); err != nil {
+		t.Fatalf("file not named from front matter title: %v", err)
+	}
+	// The title is local-only and must not leak into the note body.
+	if _, n := h.noteByContent("body first line"); strings.Contains(n.Content, "My Custom Name") {
+		t.Fatalf("front matter title leaked to the server: %q", n.Content)
+	}
+
+	// Changing the body's first line keeps the front matter title as the name.
+	h.write(t, "My Custom Name.md", "---\ntitle: My Custom Name\n---\nnew body first line")
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "My Custom Name.md")); err != nil {
+		t.Fatalf("file was renamed away from the front matter title: %v", err)
+	}
+	if _, n := h.noteByContent("new body first line"); n.Content == "" {
+		t.Fatal("edited body was not pushed")
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "new body first line.md")); !os.IsNotExist(err) {
+		t.Fatalf("file was also named from the body first line")
 	}
 }
 

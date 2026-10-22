@@ -64,6 +64,8 @@ type work struct {
 	localExists   bool
 	localContent  string
 	localFront    string // front matter as found on disk
+	localTitle    string
+	localTitleSet bool // whether the front matter has an explicit "title" key
 	localTags     []string
 	localTagsSet  bool // whether the front matter has an explicit "tags" key
 	localHash     string
@@ -111,13 +113,15 @@ func (w *work) noteID() string {
 // localFile is a markdown file on disk that no state entry claims yet. It is
 // either a manual rename of a tracked note or a brand new note.
 type localFile struct {
-	name    string
-	front   string
-	body    string
-	tags    []string
-	tagsSet bool
-	hash    string
-	id      string // front matter note id, empty when absent
+	name     string
+	front    string
+	body     string
+	title    string
+	titleSet bool
+	tags     []string
+	tagsSet  bool
+	hash     string
+	id       string // front matter note id, empty when absent
 }
 
 // Run executes one full sync pass. When dryRun is set nothing is written.
@@ -240,9 +244,12 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			continue // missing or unreadable: treated as a local deletion
 		}
 		front, body := store.SplitFrontMatter(full)
+		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
 		w.localExists = true
 		w.localFront = front
+		w.localTitle = title
+		w.localTitleSet = titleSet
 		w.localTags = tags
 		w.localTagsSet = tagsSet
 		w.localContent = body
@@ -314,9 +321,11 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			continue
 		}
 		front, body := store.SplitFrontMatter(full)
+		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
 		strays = append(strays, &localFile{
 			name: name, front: front, body: body,
+			title: title, titleSet: titleSet,
 			tags: tags, tagsSet: tagsSet,
 			hash: store.HashContent(body),
 			id:   store.FrontMatterID(front),
@@ -411,6 +420,8 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			st:            &store.NoteState{ID: id},
 			localExists:   true,
 			localFront:    f.front,
+			localTitle:    f.title,
+			localTitleSet: f.titleSet,
 			localTags:     f.tags,
 			localTagsSet:  f.tagsSet,
 			localContent:  f.body,
@@ -448,6 +459,8 @@ func deleteUnclaimedHash(byHash map[string][]string, id string) {
 func (e *Engine) adoptRename(w *work, f *localFile, how string) {
 	w.localExists = true
 	w.localFront = f.front
+	w.localTitle = f.title
+	w.localTitleSet = f.titleSet
 	w.localTags = f.tags
 	w.localTagsSet = f.tagsSet
 	w.localContent = f.body
@@ -474,6 +487,8 @@ func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simpe
 		remoteExists:  true,
 		localExists:   true,
 		localFront:    f.front,
+		localTitle:    f.title,
+		localTitleSet: f.titleSet,
 		localTags:     f.tags,
 		localTagsSet:  f.tagsSet,
 		localContent:  f.body,
@@ -729,6 +744,8 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 			id:              id,
 			st:              &store.NoteState{ID: id},
 			localFront:      w.localFront,
+			localTitle:      w.localTitle,
+			localTitleSet:   w.localTitleSet,
 			localTags:       w.localTags,
 			localTagsSet:    w.localTagsSet,
 			localContent:    w.localContent,
@@ -744,6 +761,16 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 	}
 }
 
+// filenameTitle returns the title used for the file name: the front matter's
+// "title" key when the file declares one, otherwise the body's first non-empty
+// line.
+func (w *work) filenameTitle() string {
+	if w.localTitleSet {
+		return w.localTitle
+	}
+	return Title(w.finalContent)
+}
+
 func (e *Engine) assignFilenames(works map[string]*work) {
 	type target struct {
 		w    *work
@@ -755,7 +782,7 @@ func (e *Engine) assignFilenames(works map[string]*work) {
 		if w.finalDeleted {
 			continue
 		}
-		stem := Sanitize(Title(w.finalContent))
+		stem := Sanitize(w.filenameTitle())
 		if w.conflictCopy {
 			stem += " (conflict)"
 		}
