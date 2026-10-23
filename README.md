@@ -26,14 +26,14 @@ as a `.7z` archive containing `snsync.exe` and `README.md`:
 
 ```sh
 # Linux / macOS
-VERSION=0.1.3
+VERSION=0.1.9
 curl -L -o snsync "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-linux-amd64"
 chmod +x snsync
 ```
 
 ```powershell
 # Windows
-$VERSION = '0.1.3'
+$VERSION = '0.1.9'
 curl.exe -L -o snsync.7z "https://github.com/dodorz/snsync/releases/download/$VERSION/snsync-$VERSION-windows-amd64.7z"
 7z x snsync.7z
 ```
@@ -77,7 +77,7 @@ binaries for Linux, macOS and Windows (amd64 + arm64), writes a
 `checksums.txt`, and attaches everything to the GitHub Release for that tag.
 
 ```sh
-git tag 0.1.2 && git push origin 0.1.2
+git tag 0.1.9 && git push origin 0.1.9
 ```
 
 ## Usage
@@ -98,12 +98,26 @@ git tag 0.1.2 && git push origin 0.1.2
 # force a full reconciliation (ignore the incremental cursor)
 ./snsync sync --full
 
+# override the mass-deletion guard after intentionally emptying the folder
+./snsync sync --allow-mass-delete
+
 # keep syncing until interrupted (polls every 60s by default)
 ./snsync watch
 ./snsync watch --interval 90s
 
 # show state
 ./snsync status
+
+# rename local files to the sync naming rule (front matter title / first line)
+./snsync rename --dry-run
+./snsync rename
+
+# permanently delete notes trashed in the last 48h (dry run first)
+./snsync purge-trash --since 48h
+./snsync purge-trash --since 48h --yes
+
+# drop bookkeeping for notes that are already in the trash
+./snsync prune-state
 ```
 
 Config lives at `~/.config/snsync/config.json` by default; use `-c path` to
@@ -169,7 +183,48 @@ current server state, and the current local file.
 
 Deletions travel in both directions. Nothing is ever hard-deleted: local files
 go to `.trash/`, remote notes get `deleted: true` (Simplenote's own
-trash).
+trash). A local deletion is logged as `trash  <file> (remote)`.
+
+Because a missing local file normally means "delete it remotely", a state file
+that no longer matches the directory (for example after the directory was moved
+or restored from a backup) used to look like a deliberate mass deletion. The
+engine now refuses to propagate **20 or more** local deletions that make up at
+least **25%** of the tracked notes, before anything is written. Restore the
+files if they are still wanted, or re-run with `--allow-mass-delete` for an
+intentional cleanup.
+
+### Emptying recent trash
+
+`snsync purge-trash --since 48h` permanently deletes notes that were moved to
+the Simplenote trash within the last 48 hours and leaves older trash alone. It
+normally uses the deletion times recorded in the state file; when the state has
+no tombstones left (for example after `prune-state`), or when `--remote` is
+given, it scans the full remote index instead, which can take a while on a
+large account but also sees notes trashed by another client. The command is a
+dry run unless `--yes` is given:
+
+```sh
+./snsync purge-trash --since 48h              # show how many would be deleted
+./snsync purge-trash --since 48h --yes        # delete them for real
+./snsync purge-trash --since 48h --yes --jobs 8
+```
+
+By default a recently trashed note is only purged when its content still
+exists in a live note, so the cleanup cannot permanently remove the only
+remaining copy of something. The dry run reports how many such "orphans" were
+kept; `--purge-orphans` deletes those as well.
+
+Run a successful `sync` first so local changes are already reflected remotely.
+Hard deletes cannot be undone; a note deleted this way no longer appears in
+Simplenote's trash. Notes already absent from the server (HTTP 404) are treated
+as successfully purged, so an interrupted cleanup can simply be re-run.
+
+`state.json` only needs entries for **live** notes: they map a local file to a
+server key and hold the last synced hash. Trashed notes are recognised as
+deleted from the remote index, so full syncs no longer copy the whole
+Simplenote trash into the state file. An older or already bloated state file
+can be compacted with `snsync prune-state`, which drops every `deleted` entry
+and leaves the cursor and live notes untouched. Add `--dry-run` to preview it.
 
 ### Incremental sync
 
@@ -233,7 +288,9 @@ or is killed; the lock file itself can be left on disk.
   body it overwrites is copied into `.trash/` first. When the guess is not safe
   to make (several notes lost their file at once) nothing is invented: the
   missing notes go to Simplenote's trash and the new file becomes a new note,
-  exactly as before.
+  exactly as before. Run `snsync rename` to apply the naming rule to existing
+  files without contacting the server (`--dry-run` previews it); it also updates
+  the state file, so the next sync sees no renames.
 - `snsync` records which Simplenote note each file belongs to in the front
   matter:
 
@@ -260,8 +317,17 @@ or is killed; the lock file itself can be left on disk.
 
   An inline list (`tags: [work, home]`) is also accepted when reading. Editing
   them in the file pushes the new set to Simplenote, and remote changes are
-  written back. The pinned/markdown **system tags** are not written to the file;
-  they live in the state file.
+  written back.
+- Pinning is mirrored as `pinned: true` in the front matter:
+
+  ```yaml
+  pinned: true
+  ```
+
+  A missing key means `false`, so deleting the line (or setting it to `false`)
+  unpins on the next sync. This is YAML-only: files with `+++` (TOML) front
+  matter keep the server's pin. The `markdown` system tag is still kept only in
+  the state file.
 - A file that declares its own `title` keeps that name:
 
   ```yaml
@@ -276,11 +342,11 @@ or is killed; the lock file itself can be left on disk.
   uploaded and Simplenote keeps showing the note's first line). Remove the key
   and the name follows the body again. YAML only, as with the id.
 - Front matter — a leading `---` (YAML) or `+++` (TOML) block — stays on disk.
-  Apart from `tags`, `title` and `simplenote_id`, it is ignored when comparing,
-  hashing and uploading, and is preserved when the file is updated from the
-  server, so it never appears in Simplenote. Only `tags` changing triggers an
-  upload; renaming the file or editing any other front matter key is invisible
-  to the server.
+  Apart from `title`, `tags`, `pinned` and `simplenote_id`, it is ignored when
+  comparing, hashing and uploading, and is preserved when the file is updated
+  from the server, so it never appears in Simplenote. Only `tags` or `pinned`
+  changing triggers an upload; renaming the file or editing `title` or any other
+  front matter key is invisible to the server.
 - Local markdown files are written with **CRLF** (`\r\n`) line endings. Any
   line-ending style is accepted when reading, and existing files are converted
   on the next sync.

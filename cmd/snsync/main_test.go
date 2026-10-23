@@ -34,6 +34,26 @@ func TestParseArgs(t *testing.T) {
 			want: options{command: "version", configPath: defaultConfigPath()},
 		},
 		{
+			name: "purge trash",
+			args: []string{"purge-trash", "--since", "48h"},
+			want: options{command: "purge-trash", configPath: defaultConfigPath(), since: 48 * time.Hour, sinceSet: true, jobs: 4},
+		},
+		{
+			name: "purge trash remote scan",
+			args: []string{"purge-trash", "--since", "48h", "--remote"},
+			want: options{command: "purge-trash", configPath: defaultConfigPath(), since: 48 * time.Hour, sinceSet: true, jobs: 4, purgeRemote: true},
+		},
+		{
+			name:    "purge trash without window",
+			args:    []string{"purge-trash"},
+			wantErr: true,
+		},
+		{
+			name:    "purge trash with too many jobs",
+			args:    []string{"purge-trash", "--since", "48h", "--jobs", "99"},
+			wantErr: true,
+		},
+		{
 			name: "login with token",
 			args: []string{"login", "--token", "abc"},
 			want: options{command: "login", configPath: defaultConfigPath(), token: "abc"},
@@ -93,7 +113,7 @@ func TestRunSyncSkipsWhenLocked(t *testing.T) {
 	}
 	defer lk.Release()
 
-	if err := runSync(cfgPath, false, false); !errors.Is(err, lock.ErrHeld) {
+	if err := runSync(cfgPath, false, false, false); !errors.Is(err, lock.ErrHeld) {
 		t.Fatalf("runSync: got %v, want ErrHeld", err)
 	}
 }

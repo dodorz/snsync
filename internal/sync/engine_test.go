@@ -2,6 +2,7 @@ package sync
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -546,7 +547,7 @@ func TestPullNewRemoteNote(t *testing.T) {
 	h.run(t)
 
 	got := h.read(t, "from the server.md")
-	want := "---\r\nsimplenote_id: abc\r\ntags:\r\n  - work\r\n---\r\nfrom the server"
+	want := "---\r\nsimplenote_id: abc\r\ntags:\r\n  - work\r\npinned: true\r\n---\r\nfrom the server"
 	if got != want {
 		t.Fatalf("unexpected file content: %q, want %q", got, want)
 	}
@@ -556,6 +557,60 @@ func TestPullNewRemoteNote(t *testing.T) {
 	}
 	if len(st.Tags) != 1 || st.Tags[0] != "work" {
 		t.Fatalf("tags not preserved: %+v", st.Tags)
+	}
+	if !containsString(st.SystemTags, "pinned") {
+		t.Fatalf("pin not preserved in state: %+v", st.SystemTags)
+	}
+}
+
+func TestMassLocalDeleteIsRefused(t *testing.T) {
+	h := newHarness(t)
+	const n = massDeleteMin + 5
+	for i := 0; i < n; i++ {
+		h.write(t, fmt.Sprintf("note-%02d.md", i), fmt.Sprintf("content %d", i))
+	}
+	h.run(t)
+	if len(h.srv.notes) != n {
+		t.Fatalf("expected %d notes, got %d", n, len(h.srv.notes))
+	}
+
+	entries, err := os.ReadDir(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".md") {
+			if err := os.Remove(filepath.Join(h.dir, e.Name())); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+
+	// The guard must refuse before anything is trashed.
+	err = h.eng.Run(false)
+	if err == nil {
+		t.Fatal("expected the mass deletion guard to abort the sync")
+	}
+	if !strings.Contains(err.Error(), "allow-mass-delete") {
+		t.Fatalf("error should name the override flag: %v", err)
+	}
+	for id, note := range h.srv.notes {
+		if note.Deleted {
+			t.Fatalf("note %s was trashed despite the guard", id)
+		}
+	}
+
+	// The override lets an intentional cleanup proceed.
+	h.eng.AllowMassDelete = true
+	h.run(t)
+	deleted := 0
+	for _, note := range h.srv.notes {
+		if note.Deleted {
+			deleted++
+		}
+	}
+	if deleted != n {
+		t.Fatalf("expected %d trashed notes, got %d", n, deleted)
 	}
 }
 
@@ -582,8 +637,28 @@ func TestLocalDeletePropagates(t *testing.T) {
 	if !n.Deleted {
 		t.Fatal("local deletion was not propagated as deleted=true")
 	}
-	if !h.stateByServerKey(id).Deleted {
-		t.Fatal("state did not record the deletion")
+	if st := h.stateByServerKey(id); st != nil {
+		t.Fatalf("trashed note should not stay in the state file: %+v", st)
+	}
+}
+
+func TestFullSyncDoesNotAccumulateTrash(t *testing.T) {
+	h := newHarness(t)
+	// A note that only exists in the remote trash, plus a live one so the
+	// state file is non-empty.
+	h.srv.put("live", simperium.Note{Content: "live note"})
+	h.srv.put("trash", simperium.Note{Content: "only in trash", Deleted: true})
+
+	h.runFull(t)
+
+	if st := h.stateByServerKey("trash"); st != nil {
+		t.Fatalf("trashed note was added to the state file: %+v", st)
+	}
+	if len(h.st.Notes) != 1 {
+		t.Fatalf("expected only the live note in state, got %d entries", len(h.st.Notes))
+	}
+	if st := h.stateByServerKey("live"); st == nil || st.Deleted {
+		t.Fatalf("live note missing from state: %+v", st)
 	}
 }
 
@@ -737,24 +812,24 @@ func TestPeriodicFullSync(t *testing.T) {
 
 func TestFrontMatterIsLocalOnly(t *testing.T) {
 	h := newHarness(t)
-	h.write(t, "note.md", "---\ntitle: local\n---\nbody text")
+	h.write(t, "note.md", "---\nsource: local\n---\nbody text")
 	h.run(t)
 
 	id, n := h.noteByContent("body text")
 	if id == "" {
 		t.Fatal("note body was not pushed")
 	}
-	if strings.Contains(n.Content, "title: local") {
+	if strings.Contains(n.Content, "source: local") {
 		t.Fatalf("front matter leaked to the server: %q", n.Content)
 	}
 	if n.Content != "body text" {
 		t.Fatalf("server content = %q, want the body only", n.Content)
 	}
 
-	// The file is named after the front matter title, keeps the front matter and
+	// The file is renamed after its (body) title, keeps the front matter and
 	// uses CRLF line endings.
-	got := h.read(t, "local.md")
-	if !strings.Contains(got, "title: local") {
+	got := h.read(t, "body text.md")
+	if !strings.Contains(got, "source: local") {
 		t.Fatalf("front matter was dropped locally: %q", got)
 	}
 	if !strings.HasPrefix(got, "---\r\n") || !strings.Contains(got, "\r\nbody text") {
@@ -765,14 +840,42 @@ func TestFrontMatterIsLocalOnly(t *testing.T) {
 	}
 
 	// Editing only the front matter does not change the note, so nothing is
-	// pushed; the title still renames the file.
-	h.write(t, "local.md", "---\ntitle: edited\n---\nbody text")
+	// pushed and the second sync is otherwise a no-op.
+	h.write(t, "body text.md", "---\nsource: edited\n---\nbody text")
 	h.run(t)
 	if h.srv.pushes != 1 {
 		t.Fatalf("front matter edit triggered a push: %d pushes", h.srv.pushes)
 	}
-	if got := h.read(t, "edited.md"); !strings.Contains(got, "title: edited") {
+	if got := h.read(t, "body text.md"); !strings.Contains(got, "source: edited") {
 		t.Fatalf("edited front matter was not kept: %q", got)
+	}
+}
+
+func TestFrontMatterTitleControlsFilename(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "note.md", "---\ntitle: My Custom Name\n---\nbody first line")
+	h.run(t)
+
+	// The file is named from the front matter title, not the body.
+	if _, err := os.Stat(filepath.Join(h.dir, "My Custom Name.md")); err != nil {
+		t.Fatalf("file not named from front matter title: %v", err)
+	}
+	// The title is local-only and must not leak into the note body.
+	if _, n := h.noteByContent("body first line"); strings.Contains(n.Content, "My Custom Name") {
+		t.Fatalf("front matter title leaked to the server: %q", n.Content)
+	}
+
+	// Changing the body's first line keeps the front matter title as the name.
+	h.write(t, "My Custom Name.md", "---\ntitle: My Custom Name\n---\nnew body first line")
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "My Custom Name.md")); err != nil {
+		t.Fatalf("file was renamed away from the front matter title: %v", err)
+	}
+	if _, n := h.noteByContent("new body first line"); n.Content == "" {
+		t.Fatal("edited body was not pushed")
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "new body first line.md")); !os.IsNotExist(err) {
+		t.Fatalf("file was also named from the body first line")
 	}
 }
 
@@ -825,6 +928,39 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 	h.run(t)
 	if got := h.read(t, "tagged note.md"); !strings.Contains(got, "tags:\r\n  - remote") {
 		t.Fatalf("remote tags not written to front matter: %q", got)
+	}
+}
+
+func TestPinnedFrontMatter(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned"}})
+	h.run(t)
+
+	// A remote pin is written to the file.
+	got := h.read(t, "pinned note.md")
+	if !strings.Contains(got, "pinned: true") {
+		t.Fatalf("remote pin not written to front matter: %q", got)
+	}
+
+	// A missing "pinned" key means false, so deleting it unpins.
+	h.write(t, "pinned note.md", "pinned note")
+	h.run(t)
+	if _, n := h.noteByContent("pinned note"); containsString(n.SystemTags, "pinned") {
+		t.Fatalf("deleting pinned did not unpin: %v", n.SystemTags)
+	}
+
+	// Pinning locally pushes it again.
+	h.write(t, "pinned note.md", "---\npinned: true\n---\npinned note")
+	h.run(t)
+	if _, n := h.noteByContent("pinned note"); !containsString(n.SystemTags, "pinned") {
+		t.Fatalf("local pin not pushed: %v", n.SystemTags)
+	}
+
+	// A remote unpin is reflected in the file.
+	h.srv.put("a", simperium.Note{Content: "pinned note"})
+	h.run(t)
+	if got := h.read(t, "pinned note.md"); strings.Contains(got, "pinned:") {
+		t.Fatalf("remote unpin not reflected in front matter: %q", got)
 	}
 }
 

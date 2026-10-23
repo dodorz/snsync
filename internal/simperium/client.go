@@ -386,14 +386,37 @@ func (c *Client) Get(key string) (*Note, error) {
 	return &n, nil
 }
 
+// notFoundError is an HTTP 404, e.g. when a note was already hard-deleted.
+type notFoundError struct{ msg string }
+
+func (e *notFoundError) Error() string { return e.msg }
+
+// IsNotFound reports whether err means the note does not exist (HTTP 404).
+func IsNotFound(err error) bool {
+	var nf *notFoundError
+	return errors.As(err, &nf)
+}
+
 // Delete permanently removes a note (hard delete). Prefer marking
-// Note.Deleted = true to move a note to the trash.
+// Note.Deleted = true to move a note to the trash. Transient failures are
+// retried; a 404 is returned as IsNotFound so callers can treat an already
+// missing note as success.
 func (c *Client) Delete(key string) error {
 	q := url.Values{}
 	q.Set("clientid", c.ClientID)
 	q.Set("ccid", randHex(16))
 	u := fmt.Sprintf("%s/1/%s/%s/i/%s?%s", c.APIHost, c.AppID, NoteBucket, url.PathEscape(key), q.Encode())
-	return c.doJSON(http.MethodDelete, u, nil, nil)
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(time.Duration(attempt-1) * retryDelay)
+		}
+		lastErr = c.doJSON(http.MethodDelete, u, nil, nil)
+		if lastErr == nil || IsNotFound(lastErr) || !isRetryable(lastErr) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("%w (after %d attempts)", lastErr, maxAttempts)
 }
 
 func (c *Client) doJSON(method, u string, body any, out any) error {
@@ -431,6 +454,9 @@ func (c *Client) doJSON(method, u string, body any, out any) error {
 	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		return &AuthError{fmt.Sprintf("HTTP 401 from %s", method)}
+	}
+	if resp.StatusCode == http.StatusNotFound {
+		return &notFoundError{fmt.Sprintf("%s %s: HTTP 404", method, u)}
 	}
 	if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
 		return &statusError{resp.StatusCode, fmt.Sprintf("%s %s: HTTP %d: %s", method, u, resp.StatusCode, truncate(rb))}

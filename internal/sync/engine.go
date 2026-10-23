@@ -26,7 +26,22 @@ type Engine struct {
 	Log      func(format string, args ...any)
 	Full     bool // force a full reconciliation
 	fullSync bool // whether the current run is a full reconciliation
+
+	// AllowMassDelete permits propagating a large number of local deletions
+	// (for example after deliberately clearing the notes directory). Without
+	// it a sync that would trash most of the account aborts before writing
+	// anything, so a moved/restored directory cannot wipe the remote side.
+	AllowMassDelete bool
 }
+
+const (
+	// massDeleteMin is the smallest number of local deletions that can trip
+	// the guard; small everyday deletions are never blocked.
+	massDeleteMin = 20
+	// massDeletePercent is the share of tracked notes that must be deleted for
+	// the guard to trigger (25%).
+	massDeletePercent = 25
+)
 
 // New builds an engine.
 func New(cfg *config.Config, sn *simperium.Client, st *store.State) *Engine {
@@ -49,10 +64,16 @@ type work struct {
 	localExists   bool
 	localContent  string
 	localFront    string // front matter as found on disk
+	localTitle    string
+	localTitleSet bool // whether the front matter has an explicit "title" key
 	localTags     []string
 	localTagsSet  bool // whether the front matter has an explicit "tags" key
-	localHash     string
-	localFilename string
+	localPinned   bool // absent "pinned" means false
+	// localPinnedKnown is false for TOML ("+++") front matter, which is never
+	// rewritten, so its pin is left to the server instead of being unpinned.
+	localPinnedKnown bool
+	localHash        string
+	localFilename    string
 	// decision
 	finalContent    string
 	finalTags       []string
@@ -96,13 +117,17 @@ func (w *work) noteID() string {
 // localFile is a markdown file on disk that no state entry claims yet. It is
 // either a manual rename of a tracked note or a brand new note.
 type localFile struct {
-	name    string
-	front   string
-	body    string
-	tags    []string
-	tagsSet bool
-	hash    string
-	id      string // front matter note id, empty when absent
+	name        string
+	front       string
+	body        string
+	title       string
+	titleSet    bool
+	tags        []string
+	tagsSet     bool
+	pinned      bool // absent "pinned" means false
+	pinnedKnown bool
+	hash        string
+	id          string // front matter note id, empty when absent
 }
 
 // Run executes one full sync pass. When dryRun is set nothing is written.
@@ -148,6 +173,10 @@ func (e *Engine) Run(dryRun bool) error {
 	e.assignKeys(works)
 
 	ids := sortedIDs(works)
+
+	if err := e.checkMassDeletion(works); err != nil {
+		return err
+	}
 
 	if err := e.applyLocal(works, ids, dryRun); err != nil {
 		return err
@@ -221,11 +250,17 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			continue // missing or unreadable: treated as a local deletion
 		}
 		front, body := store.SplitFrontMatter(full)
+		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
+		pinned, _ := store.FrontMatterPinned(front)
 		w.localExists = true
 		w.localFront = front
+		w.localTitle = title
+		w.localTitleSet = titleSet
 		w.localTags = tags
 		w.localTagsSet = tagsSet
+		w.localPinned = pinned
+		w.localPinnedKnown = !strings.HasPrefix(front, "+++")
 		w.localContent = body
 		w.localHash = store.HashContent(body)
 		w.localFilename = w.st.Filename
@@ -295,10 +330,14 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			continue
 		}
 		front, body := store.SplitFrontMatter(full)
+		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
+		pinned, _ := store.FrontMatterPinned(front)
 		strays = append(strays, &localFile{
 			name: name, front: front, body: body,
+			title: title, titleSet: titleSet,
 			tags: tags, tagsSet: tagsSet,
+			pinned: pinned, pinnedKnown: !strings.HasPrefix(front, "+++"),
 			hash: store.HashContent(body),
 			id:   store.FrontMatterID(front),
 		})
@@ -388,15 +427,19 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 	for _, f := range rest {
 		id := "local:" + localHex(8)
 		works[id] = &work{
-			id:            id,
-			st:            &store.NoteState{ID: id},
-			localExists:   true,
-			localFront:    f.front,
-			localTags:     f.tags,
-			localTagsSet:  f.tagsSet,
-			localContent:  f.body,
-			localHash:     f.hash,
-			localFilename: f.name,
+			id:               id,
+			st:               &store.NoteState{ID: id},
+			localExists:      true,
+			localFront:       f.front,
+			localTitle:       f.title,
+			localTitleSet:    f.titleSet,
+			localTags:        f.tags,
+			localTagsSet:     f.tagsSet,
+			localPinned:      f.pinned,
+			localPinnedKnown: f.pinnedKnown,
+			localContent:     f.body,
+			localHash:        f.hash,
+			localFilename:    f.name,
 		}
 	}
 
@@ -429,8 +472,12 @@ func deleteUnclaimedHash(byHash map[string][]string, id string) {
 func (e *Engine) adoptRename(w *work, f *localFile, how string) {
 	w.localExists = true
 	w.localFront = f.front
+	w.localTitle = f.title
+	w.localTitleSet = f.titleSet
 	w.localTags = f.tags
 	w.localTagsSet = f.tagsSet
+	w.localPinned = f.pinned
+	w.localPinnedKnown = f.pinnedKnown
 	w.localContent = f.body
 	w.localHash = f.hash
 	w.localFilename = f.name
@@ -451,15 +498,19 @@ func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simpe
 			ID: remoteID, ServerKey: remoteID, BaseHash: store.HashContent(r.Note.Content),
 			Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
 		},
-		remote:        &r,
-		remoteExists:  true,
-		localExists:   true,
-		localFront:    f.front,
-		localTags:     f.tags,
-		localTagsSet:  f.tagsSet,
-		localContent:  f.body,
-		localHash:     f.hash,
-		localFilename: f.name,
+		remote:           &r,
+		remoteExists:     true,
+		localExists:      true,
+		localFront:       f.front,
+		localTitle:       f.title,
+		localTitleSet:    f.titleSet,
+		localTags:        f.tags,
+		localTagsSet:     f.tagsSet,
+		localPinned:      f.pinned,
+		localPinnedKnown: f.pinnedKnown,
+		localContent:     f.body,
+		localHash:        f.hash,
+		localFilename:    f.name,
 	}
 	works[remoteID] = w
 	e.Log("adopt  %s (existing note %s)", f.name, remoteID)
@@ -515,13 +566,13 @@ func (e *Engine) decide(w *work) {
 		}
 		w.finalContent = w.localContent
 		w.finalTags = w.tags()
-		w.finalSystemTags = w.st.SystemTags
+		w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 		w.createRemote = true
 		return
 	}
 
 	localContentChanged := w.localExists && w.localHash != baseHash
-	localChanged := localContentChanged || w.tagsChanged()
+	localChanged := localContentChanged || w.tagsChanged() || w.pinnedChanged()
 	localDeleted := !w.localExists
 	remoteContentChanged := w.remoteExists && !remoteDeleted && remoteHash != baseHash
 	remoteMetaChanged := w.remoteExists &&
@@ -550,7 +601,7 @@ func (e *Engine) decide(w *work) {
 				// merge the tags before pushing them back.
 				w.finalContent = w.remote.Note.Content
 				w.finalTags = mergeTags(w.tags(), w.remote.Note.Tags)
-				w.finalSystemTags = w.remote.Note.SystemTags
+				w.finalSystemTags = w.withLocalPin(w.remote.Note.SystemTags)
 				w.writeLocal = true
 				w.updateRemote = true
 			case !remoteContentChanged:
@@ -558,7 +609,7 @@ func (e *Engine) decide(w *work) {
 				// merge the tags before pushing them back.
 				w.finalContent = w.localContent
 				w.finalTags = mergeTags(w.tags(), w.remote.Note.Tags)
-				w.finalSystemTags = w.remote.Note.SystemTags
+				w.finalSystemTags = w.withLocalPin(w.remote.Note.SystemTags)
 				w.updateRemote = true
 			default:
 				w.isConflict = true
@@ -586,7 +637,7 @@ func (e *Engine) decide(w *work) {
 			// Edited locally after remote deletion: keep it as a new note.
 			w.finalContent = w.localContent
 			w.finalTags = w.tags()
-			w.finalSystemTags = w.st.SystemTags
+			w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 			w.createRemote = true
 		default:
 			w.finalDeleted = true
@@ -600,7 +651,7 @@ func (e *Engine) decide(w *work) {
 			case localChanged:
 				w.finalContent = w.localContent
 				w.finalTags = w.tags()
-				w.finalSystemTags = w.st.SystemTags
+				w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 				w.createRemote = true
 			default:
 				w.finalDeleted = true
@@ -611,7 +662,7 @@ func (e *Engine) decide(w *work) {
 		} else {
 			w.finalContent = w.localContent
 			w.finalTags = w.tags()
-			w.finalSystemTags = w.st.SystemTags
+			w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 			w.createRemote = true
 		}
 	}
@@ -630,7 +681,7 @@ func (w *work) pull() {
 func (w *work) pushLocal() {
 	w.finalContent = w.localContent
 	w.finalTags = w.tags()
-	w.finalSystemTags = w.st.SystemTags
+	w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 	w.updateRemote = true
 }
 
@@ -650,6 +701,22 @@ func (w *work) tags() []string {
 // tagsChanged reports whether the file's tags differ from the last synced tags.
 func (w *work) tagsChanged() bool {
 	return w.localExists && w.localTagsSet && w.st != nil && !equalStrings(w.localTags, w.st.Tags)
+}
+
+// pinnedChanged reports whether the file's pin differs from the last synced
+// "pinned" system tag. A missing "pinned" key counts as false.
+func (w *work) pinnedChanged() bool {
+	return w.localExists && w.localPinnedKnown && w.st != nil &&
+		w.localPinned != containsString(w.st.SystemTags, "pinned")
+}
+
+// withLocalPin applies the file's pin setting on top of base. A missing
+// "pinned" key means false, so removing the key unpins.
+func (w *work) withLocalPin(base []string) []string {
+	if !w.localPinnedKnown {
+		return base
+	}
+	return applyPinned(base, w.localPinned)
 }
 
 // mergeTags returns the union of a and b, keeping the order of a first.
@@ -674,20 +741,19 @@ func (w *work) decideLocalOnly() {
 		// Remote is still trashed but a local file exists again: re-create it.
 		w.finalContent = w.localContent
 		w.finalTags = w.tags()
-		w.finalSystemTags = w.st.SystemTags
+		w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 		w.createRemote = true
-	case w.localExists && (w.localHash != w.st.BaseHash || w.tagsChanged()):
+	case w.localExists && (w.localHash != w.st.BaseHash || w.tagsChanged() || w.pinnedChanged()):
 		w.pushLocal()
 	case w.localExists:
 		// Unchanged; keep the file and the recorded base hash.
 		w.finalContent = w.localContent
 		w.finalTags = w.tags()
-		w.finalSystemTags = w.st.SystemTags
+		w.finalSystemTags = w.withLocalPin(w.st.SystemTags)
 		w.preserveBase = true
 	default:
 		// Local file removed: propagate the deletion.
 		w.finalDeleted = true
-		w.preserveBase = true
 		if !w.st.Deleted {
 			w.updateRemote = true
 			w.pushedDelete = true
@@ -708,34 +774,38 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 	for _, w := range conflicts {
 		id := "local:" + localHex(8)
 		cw := &work{
-			id:              id,
-			st:              &store.NoteState{ID: id},
-			localFront:      w.localFront,
-			localTags:       w.localTags,
-			localTagsSet:    w.localTagsSet,
-			localContent:    w.localContent,
-			localHash:       w.localHash,
-			finalContent:    w.localContent,
-			finalTags:       w.tags(),
-			finalSystemTags: w.st.SystemTags,
-			conflictCopy:    true,
-			createRemote:    true,
+			id:               id,
+			st:               &store.NoteState{ID: id},
+			localFront:       w.localFront,
+			localTitle:       w.localTitle,
+			localTitleSet:    w.localTitleSet,
+			localTags:        w.localTags,
+			localTagsSet:     w.localTagsSet,
+			localPinned:      w.localPinned,
+			localPinnedKnown: w.localPinnedKnown,
+			localContent:     w.localContent,
+			localHash:        w.localHash,
+			finalContent:     w.localContent,
+			finalTags:        w.tags(),
+			finalSystemTags:  w.withLocalPin(w.st.SystemTags),
+			conflictCopy:     true,
+			createRemote:     true,
 		}
 		e.Log("conflict on %q: keeping local copy", w.st.Filename)
 		works[id] = cw
 	}
 }
 
-// filenameStem is the base name for the note's file: the front matter's "title"
-// when the file declares one, otherwise the body's first line. The front matter
-// is local-only, so a title there is a way to pin a file name that the note's
-// text would not produce — which is also what keeps a renamed file from being
-// renamed back to its body title.
-func (w *work) filenameStem() string {
-	if t := store.FrontMatterTitle(w.localFront); t != "" {
-		return Sanitize(t)
+// filenameTitle returns the title used for the file name: the front matter's
+// "title" key when the file declares one, otherwise the body's first non-empty
+// line. The front matter is local-only, so a title there is a way to pin a file
+// name that the note's text would not produce — which is also what keeps a
+// renamed file from being renamed back to its body title.
+func (w *work) filenameTitle() string {
+	if w.localTitleSet {
+		return w.localTitle
 	}
-	return Sanitize(Title(w.finalContent))
+	return Title(w.finalContent)
 }
 
 // assignFilenames gives every note that stays on disk its file name.
@@ -750,7 +820,7 @@ func (e *Engine) assignFilenames(works map[string]*work) {
 		if w.finalDeleted {
 			continue
 		}
-		stem := w.filenameStem()
+		stem := Sanitize(w.filenameTitle())
 		if w.conflictCopy {
 			stem += " (conflict)"
 		}
@@ -833,6 +903,7 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		// every pass, so a hand-edited or copied id is corrected here.
 		front := store.SetFrontMatterID(w.localFront, w.noteID())
 		front = store.SetFrontMatterTags(front, w.finalTags)
+		front = store.SetFrontMatterPinned(front, containsString(w.finalSystemTags, "pinned"))
 		if oldPath != "" && oldPath != target && store.Exists(oldPath) {
 			e.Log("rename %s -> %s", w.localFilename, w.finalFilename)
 			if !dryRun {
@@ -859,6 +930,33 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		}
 	}
 	return nil
+}
+
+// checkMassDeletion refuses to propagate a large batch of local deletions.
+// A state file that no longer matches the directory (for example after the
+// directory was moved or restored from a backup) would otherwise trash most of
+// the Simplenote account, one note at a time.
+func (e *Engine) checkMassDeletion(works map[string]*work) error {
+	tracked, deleting := 0, 0
+	for _, w := range works {
+		if w.st == nil || w.st.ServerKey == "" || w.st.Deleted {
+			continue
+		}
+		tracked++
+		if w.pushedDelete {
+			deleting++
+		}
+	}
+	if deleting < massDeleteMin || tracked == 0 || deleting*100/tracked < massDeletePercent {
+		return nil
+	}
+	if e.AllowMassDelete {
+		e.Log("warning: propagating %d local deletions out of %d tracked notes (--allow-mass-delete)", deleting, tracked)
+		return nil
+	}
+	return fmt.Errorf("refusing to delete %d of %d tracked notes because their local files are missing; "+
+		"if this is intentional re-run with --allow-mass-delete, otherwise restore the files first",
+		deleting, tracked)
 }
 
 func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) error {
@@ -895,11 +993,21 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			note.CreationDate = w.remote.Note.CreationDate
 		}
 
-		if w.createRemote {
+		if w.finalDeleted {
+			// A local deletion is propagated as a remote trash (deleted=true).
+			// Log it as such instead of calling it a push: a mass cleanup then
+			// looks like what it is.
+			e.Log("trash  %s (remote)", w.displayName())
+		} else if w.createRemote {
 			e.Log("push   %s (new)", w.displayName())
-			if dryRun {
-				continue
-			}
+		} else {
+			e.Log("push   %s (update)", w.displayName())
+		}
+		if dryRun {
+			continue
+		}
+
+		if w.createRemote {
 			// The key was chosen up front (assignKeys) so that the file could
 			// already record it. Save falls back to generating one if it is
 			// empty, so keep whatever it reports.
@@ -914,10 +1022,6 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			w.st.Version = 0
 			e.recordProgress(w)
 		} else {
-			e.Log("push   %s (update)", w.displayName())
-			if dryRun {
-				continue
-			}
 			if err := e.keepOverwrittenBody(w); err != nil {
 				return err
 			}
@@ -990,10 +1094,10 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 	for _, id := range ids {
 		w := works[id]
 		if w.finalDeleted {
-			keep := w.remoteExists || w.pushedDelete
-			if !keep {
-				continue
-			}
+			// Trashed notes need no bookkeeping: only live notes map a local
+			// file to a server key. Keeping tombstones here made every full
+			// sync copy the entire Simplenote trash into the state file.
+			continue
 		}
 		baseHash := store.HashContent(w.finalContent)
 		if w.preserveBase && w.st != nil && w.st.BaseHash != "" {
@@ -1004,7 +1108,6 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 			BaseHash:   baseHash,
 			Tags:       w.finalTags,
 			SystemTags: w.finalSystemTags,
-			Deleted:    w.finalDeleted,
 			ModTime:    float64(time.Now().Unix()),
 		}
 		if w.st != nil {
@@ -1016,13 +1119,8 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 			}
 			ns.Version = w.remote.Version
 			ns.ModTime = w.remote.Note.ModificationDate
-			if w.finalDeleted {
-				ns.BaseHash = store.HashContent(w.remote.Note.Content)
-			}
 		}
-		if !w.finalDeleted {
-			ns.Filename = w.finalFilename
-		}
+		ns.Filename = w.finalFilename
 		next[id] = ns
 	}
 	e.st.Notes = next
@@ -1101,6 +1199,33 @@ func nonNil(s []string) []string {
 		return []string{}
 	}
 	return s
+}
+
+// applyPinned returns systemTags with the "pinned" entry set or cleared. It
+// reuses the input when nothing needs to change, keeping the order stable.
+func applyPinned(systemTags []string, pinned bool) []string {
+	if containsString(systemTags, "pinned") == pinned {
+		return systemTags
+	}
+	out := make([]string, 0, len(systemTags)+1)
+	for _, t := range systemTags {
+		if t != "pinned" {
+			out = append(out, t)
+		}
+	}
+	if pinned {
+		out = append(out, "pinned")
+	}
+	return out
+}
+
+func containsString(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func localHex(n int) string {

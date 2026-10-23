@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -42,11 +43,17 @@ func main() {
 	case "login":
 		err = runLogin(opts.configPath, opts.token)
 	case "sync":
-		err = runSync(opts.configPath, opts.dryRun, opts.full)
+		err = runSync(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete)
 	case "watch":
-		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.interval, opts.intervalSet)
+		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete, opts.interval, opts.intervalSet)
 	case "status":
 		err = runStatus(opts.configPath)
+	case "rename":
+		err = runRename(opts.configPath, opts.dryRun)
+	case "purge-trash":
+		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans, opts.purgeRemote)
+	case "prune-state":
+		err = runPruneState(opts.configPath, opts.dryRun)
 	case "version":
 		fmt.Printf("snsync %s\n", version)
 	case "help":
@@ -73,11 +80,24 @@ type options struct {
 	configPath string
 	dryRun     bool
 	full       bool
-	token      string
-	interval   time.Duration
+	// allowMassDelete overrides the safety check that stops a sync from
+	// trashing most of the account when many local files disappeared.
+	allowMassDelete bool
+	token           string
+	interval        time.Duration
 	// intervalSet records whether --interval was given, so the config value can
 	// be used when it was not.
 	intervalSet bool
+	// purge-trash options.
+	since    time.Duration
+	sinceSet bool
+	yes      bool
+	jobs     int
+	// purgeOrphans also purges recently trashed notes whose content has no
+	// surviving copy.
+	purgeOrphans bool
+	// purgeRemote scans the full remote index instead of the state tombstones.
+	purgeRemote bool
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -123,6 +143,46 @@ func parseArgs(args []string) (*options, error) {
 			o.dryRun = true
 		case a == "-full" || a == "--full":
 			o.full = true
+		case a == "-allow-mass-delete" || a == "--allow-mass-delete":
+			o.allowMassDelete = true
+		case a == "--since" || a == "-since":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			d, err := time.ParseDuration(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("invalid --since: %w", err)
+			}
+			o.since, o.sinceSet = d, true
+		case strings.HasPrefix(a, "--since="):
+			d, err := time.ParseDuration(strings.TrimPrefix(a, "--since="))
+			if err != nil {
+				return nil, fmt.Errorf("invalid --since: %w", err)
+			}
+			o.since, o.sinceSet = d, true
+		case a == "--yes" || a == "-yes":
+			o.yes = true
+		case a == "--purge-orphans" || a == "-purge-orphans":
+			o.purgeOrphans = true
+		case a == "--remote" || a == "-remote":
+			o.purgeRemote = true
+		case a == "--jobs" || a == "-jobs":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			n, err := strconv.Atoi(args[i])
+			if err != nil {
+				return nil, fmt.Errorf("invalid --jobs: %w", err)
+			}
+			o.jobs = n
+		case strings.HasPrefix(a, "--jobs="):
+			n, err := strconv.Atoi(strings.TrimPrefix(a, "--jobs="))
+			if err != nil {
+				return nil, fmt.Errorf("invalid --jobs: %w", err)
+			}
+			o.jobs = n
 		case a == "-h" || a == "--help":
 			o.command = "help"
 		case a == "-v" || a == "--version":
@@ -140,6 +200,16 @@ func parseArgs(args []string) (*options, error) {
 	case "watch":
 		if o.intervalSet && o.interval <= 0 {
 			return nil, fmt.Errorf("--interval must be positive")
+		}
+	case "purge-trash":
+		if !o.sinceSet || o.since <= 0 {
+			return nil, fmt.Errorf("purge-trash needs a positive --since, e.g. --since 48h")
+		}
+		if o.jobs == 0 {
+			o.jobs = 4
+		}
+		if o.jobs < 1 || o.jobs > 16 {
+			return nil, fmt.Errorf("--jobs must be between 1 and 16")
 		}
 	}
 	return o, nil
@@ -255,7 +325,7 @@ func newClient(cfg *config.Config, token string) *simperium.Client {
 	return sn
 }
 
-func runSync(path string, dry, full bool) error {
+func runSync(path string, dry, full, allowMassDelete bool) error {
 	cfg, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
@@ -263,6 +333,7 @@ func runSync(path string, dry, full bool) error {
 	defer lk.Release()
 	eng := syncpkg.New(cfg, sn, st)
 	eng.Full = full
+	eng.AllowMassDelete = allowMassDelete
 	eng.Log = func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -277,7 +348,7 @@ func runSync(path string, dry, full bool) error {
 	return nil
 }
 
-func runWatch(path string, dry, full bool, interval time.Duration, intervalSet bool) error {
+func runWatch(path string, dry, full, allowMassDelete bool, interval time.Duration, intervalSet bool) error {
 	cfg, sn, st, lk, err := loadLocked(path)
 	if err != nil {
 		return err
@@ -291,6 +362,7 @@ func runWatch(path string, dry, full bool, interval time.Duration, intervalSet b
 		}
 	}
 	eng := syncpkg.New(cfg, sn, st)
+	eng.AllowMassDelete = allowMassDelete
 	eng.Log = func(format string, args ...any) {
 		fmt.Printf(format+"\n", args...)
 	}
@@ -347,6 +419,82 @@ func runStatus(path string) error {
 	fmt.Printf("since full:   %d incremental sync(s)\n", st.IncrementalSinceFull)
 	fmt.Printf("notes:        %d (%d deleted, %d not yet pushed)\n", len(st.Notes), deleted, pending)
 	return nil
+}
+
+// runRename renames local files to match the sync naming rule (front matter
+// "title", falling back to the body's first line) without touching the server.
+func runRename(path string, dryRun bool) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return err
+	}
+	if cfg.LocalDir == "" {
+		return fmt.Errorf("config: local_dir is required")
+	}
+	if !dryRun {
+		if cfg.StateFile == "" {
+			return fmt.Errorf("local_dir is required to locate the state file")
+		}
+		lk, err := lock.Acquire(cfg.StateFile + ".lock")
+		if err != nil {
+			return err
+		}
+		defer lk.Release()
+	}
+
+	renames, err := syncpkg.PlanLocalRenames(cfg.LocalDir)
+	if err != nil {
+		return err
+	}
+	if len(renames) == 0 {
+		fmt.Println("no renames needed")
+		return nil
+	}
+	for _, r := range renames {
+		fmt.Printf("rename %s -> %s\n", r.From, r.To)
+	}
+	if dryRun {
+		fmt.Printf("dry run: %d file(s) would be renamed\n", len(renames))
+		return nil
+	}
+	if err := syncpkg.ApplyLocalRenames(cfg.LocalDir, renames); err != nil {
+		return err
+	}
+	if err := updateStateFilenames(cfg.StateFile, renames); err != nil {
+		return err
+	}
+	fmt.Printf("renamed %d file(s)\n", len(renames))
+	return nil
+}
+
+// updateStateFilenames keeps the state file in step with renamed local files,
+// so the next sync finds them without going through rename detection.
+func updateStateFilenames(path string, renames []syncpkg.Rename) error {
+	if path == "" {
+		return nil
+	}
+	st, err := store.LoadState(path)
+	if err != nil {
+		return err
+	}
+	if len(st.Notes) == 0 {
+		return nil
+	}
+	byOld := make(map[string]string, len(renames))
+	for _, r := range renames {
+		byOld[r.From] = r.To
+	}
+	changed := false
+	for _, ns := range st.Notes {
+		if to, ok := byOld[ns.Filename]; ok {
+			ns.Filename = to
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return st.Save()
 }
 
 // loadLocked loads the config and state while holding the per-state-directory
@@ -413,6 +561,11 @@ commands:
   sync      run one reconciliation pass
   watch     keep syncing on an interval until interrupted
   status    show sync state summary
+  rename    rename local files to match the sync naming rule (no server)
+  purge-trash
+            permanently delete recently trashed notes (older trash is kept)
+  prune-state
+            drop bookkeeping for already-trashed notes to shrink state.json
   version   print the program version
   help      show this message
 
@@ -420,6 +573,17 @@ flags:
   -c, --config <path>   config file (default ~/.config/snsync/config.json)
       --dry-run         show what would happen without writing anything
       --full            force a full reconciliation (ignore the cursor)
+      --allow-mass-delete
+                        allow a sync to trash a large part of the account when
+                        many tracked local files are missing (safety override)
+      --since <dur>     purge-trash: only notes trashed within this window are
+                        purged, e.g. 48h (required)
+      --yes             purge-trash: actually delete (default is a dry run)
+      --purge-orphans   purge-trash: also delete recent trash whose content has
+                        no surviving live copy (dangerous; default keeps them)
+      --remote          purge-trash: scan the full remote index instead of the
+                        state-file tombstones (slower, sees all clients)
+      --jobs <n>        purge-trash: concurrent deletes, 1-16 (default 4)
       --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s or
                         the watch_interval config key)
       --token <value>   save a token obtained elsewhere (login only)
