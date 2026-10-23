@@ -190,6 +190,9 @@ func (e *Engine) Run(dryRun bool) error {
 		e.Log("dry run: state not saved")
 		return nil
 	}
+	// Files have now been migrated (the pinned key is written where needed),
+	// so a missing key means "not pinned" from the next run on.
+	e.st.PinnedInFile = true
 	if e.fullSync {
 		e.st.IncrementalSinceFull = 0
 		e.st.LastFullSync = float64(time.Now().Unix())
@@ -252,7 +255,7 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		front, body := store.SplitFrontMatter(full)
 		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
-		pinned, _ := store.FrontMatterPinned(front)
+		pinned, pinnedOK := store.FrontMatterPinned(front)
 		w.localExists = true
 		w.localFront = front
 		w.localTitle = title
@@ -260,7 +263,12 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		w.localTags = tags
 		w.localTagsSet = tagsSet
 		w.localPinned = pinned
-		w.localPinnedKnown = !strings.HasPrefix(front, "+++")
+		// Before the pin feature existed, files had no "pinned" key. Treat a
+		// missing key as "unknown" for that first sync so upgrading cannot
+		// unpin every note; the run then writes the key and marks the state as
+		// migrated.
+		w.localPinnedKnown = !strings.HasPrefix(front, "+++") &&
+			(pinnedOK || e.st.PinnedInFile)
 		w.localContent = body
 		w.localHash = store.HashContent(body)
 		w.localFilename = w.st.Filename
@@ -332,12 +340,12 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		front, body := store.SplitFrontMatter(full)
 		title, titleSet := store.FrontMatterTitle(front)
 		tags, tagsSet := store.FrontMatterTags(front)
-		pinned, _ := store.FrontMatterPinned(front)
+		pinned, pinnedOK := store.FrontMatterPinned(front)
 		strays = append(strays, &localFile{
 			name: name, front: front, body: body,
 			title: title, titleSet: titleSet,
 			tags: tags, tagsSet: tagsSet,
-			pinned: pinned, pinnedKnown: !strings.HasPrefix(front, "+++"),
+			pinned: pinned, pinnedKnown: !strings.HasPrefix(front, "+++") && (pinnedOK || e.st.PinnedInFile),
 			hash: store.HashContent(body),
 			id:   store.FrontMatterID(front),
 		})

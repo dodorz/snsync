@@ -118,6 +118,10 @@ git tag 0.1.9 && git push origin 0.1.9
 
 # drop bookkeeping for notes that are already in the trash
 ./snsync prune-state
+
+# restore pins removed by 0.1.9 (dry run first; reads server version history)
+./snsync recover-pins
+./snsync recover-pins --yes
 ```
 
 Config lives at `~/.config/snsync/config.json` by default; use `-c path` to

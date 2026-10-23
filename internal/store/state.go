@@ -35,6 +35,12 @@ type State struct {
 	IncrementalSinceFull int     `json:"incremental_since_full,omitempty"`
 	LastFullSync         float64 `json:"last_full_sync,omitempty"`
 
+	// PinnedInFile records that the "pinned" front matter key is authoritative
+	// (a missing key means "not pinned"). It is false in state files written
+	// before pin support, so the first sync after upgrading migrates those
+	// files instead of unpinning every pinned note.
+	PinnedInFile bool `json:"pinned_in_file,omitempty"`
+
 	path string
 }
 

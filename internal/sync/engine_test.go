@@ -964,6 +964,44 @@ func TestPinnedFrontMatter(t *testing.T) {
 	}
 }
 
+// Upgrading from a version that did not write the "pinned" key must not treat
+// every pinned note as locally unpinned.
+func TestUpgradeDoesNotUnpin(t *testing.T) {
+	h := newHarness(t)
+	const body = "old pinned note"
+	h.srv.put("a", simperium.Note{Content: body, SystemTags: []string{"pinned"}})
+
+	// Simulate a pre-pin state file: tracked, unchanged, pinned, but the local
+	// file has no "pinned" key.
+	h.st.Notes["a"] = &store.NoteState{
+		ID:         "a",
+		ServerKey:  "a",
+		Filename:   "old pinned note.md",
+		BaseHash:   store.HashContent(body),
+		SystemTags: []string{"pinned"},
+	}
+	h.write(t, "old pinned note.md", body)
+
+	h.run(t)
+
+	if _, n := h.noteByContent(body); !containsString(n.SystemTags, "pinned") {
+		t.Fatalf("upgrade unpinned the note: %v", n.SystemTags)
+	}
+	if got := h.read(t, "old pinned note.md"); !strings.Contains(got, "pinned: true") {
+		t.Fatalf("migration did not write pinned: %q", got)
+	}
+	if !h.st.PinnedInFile {
+		t.Fatal("state was not marked as migrated")
+	}
+
+	// Once migrated, deleting the key does unpin.
+	h.write(t, "old pinned note.md", body)
+	h.run(t)
+	if _, n := h.noteByContent(body); containsString(n.SystemTags, "pinned") {
+		t.Fatalf("deleting pinned after migration did not unpin: %v", n.SystemTags)
+	}
+}
+
 // A crash or an interrupted run can lose the state file after notes were
 // already created on the server. The next run must adopt the existing pair
 // instead of pushing a duplicate note for the local file.

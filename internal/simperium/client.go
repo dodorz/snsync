@@ -386,6 +386,20 @@ func (c *Client) Get(key string) (*Note, error) {
 	return &n, nil
 }
 
+// GetVersion fetches a specific historical version of a note. Version numbers
+// are the "v" values returned by Index and start at 1, increasing with every
+// change.
+func (c *Client) GetVersion(key string, version int) (*Note, error) {
+	q := url.Values{}
+	q.Set("v", strconv.Itoa(version))
+	u := fmt.Sprintf("%s/1/%s/%s/i/%s?%s", c.APIHost, c.AppID, NoteBucket, url.PathEscape(key), q.Encode())
+	var n Note
+	if err := c.getJSON(u, &n); err != nil {
+		return nil, err
+	}
+	return &n, nil
+}
+
 // notFoundError is an HTTP 404, e.g. when a note was already hard-deleted.
 type notFoundError struct{ msg string }
 

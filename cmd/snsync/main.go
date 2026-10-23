@@ -54,6 +54,8 @@ func main() {
 		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans, opts.purgeRemote)
 	case "prune-state":
 		err = runPruneState(opts.configPath, opts.dryRun)
+	case "recover-pins":
+		err = runRecoverPins(opts.configPath, opts.yes)
 	case "version":
 		fmt.Printf("snsync %s\n", version)
 	case "help":
@@ -566,6 +568,8 @@ commands:
             permanently delete recently trashed notes (older trash is kept)
   prune-state
             drop bookkeeping for already-trashed notes to shrink state.json
+  recover-pins
+            restore pins lost by 0.1.9 from the previous server version
   version   print the program version
   help      show this message
 
@@ -578,7 +582,7 @@ flags:
                         many tracked local files are missing (safety override)
       --since <dur>     purge-trash: only notes trashed within this window are
                         purged, e.g. 48h (required)
-      --yes             purge-trash: actually delete (default is a dry run)
+      --yes             purge-trash / recover-pins: actually apply (default is a dry run)
       --purge-orphans   purge-trash: also delete recent trash whose content has
                         no surviving live copy (dangerous; default keeps them)
       --remote          purge-trash: scan the full remote index instead of the

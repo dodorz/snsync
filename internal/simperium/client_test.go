@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -55,6 +56,28 @@ func TestNoteUnmarshalLenient(t *testing.T) {
 				t.Fatalf("got %+v want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGetVersionSendsVersionQuery(t *testing.T) {
+	var gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotQuery = r.URL.RawQuery
+		_, _ = w.Write([]byte(`{"content":"old","systemTags":["pinned"]}`))
+	}))
+	defer srv.Close()
+
+	c := New("app", "key", "tok")
+	c.APIHost = srv.URL
+	n, err := c.GetVersion("abc", 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if q, _ := url.ParseQuery(gotQuery); q.Get("v") != "4" {
+		t.Fatalf("query = %q, want v=4", gotQuery)
+	}
+	if n.Content != "old" || len(n.SystemTags) != 1 || n.SystemTags[0] != "pinned" {
+		t.Fatalf("unexpected note: %+v", n)
 	}
 }
 
