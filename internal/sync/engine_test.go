@@ -25,6 +25,7 @@ type fakeServer struct {
 	changeCV map[string]int
 	cv       int
 	pushes   int
+	history  []simperium.Note // every note received by POST, in order
 }
 
 func newFakeServer() *fakeServer {
@@ -95,6 +96,7 @@ func (f *fakeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				n.CreationDate = 1
 			}
 			n.ModificationDate = 2
+			f.history = append(f.history, n)
 			f.notes[id] = n
 			f.vers[id]++
 			f.cv++
@@ -961,6 +963,40 @@ func TestPinnedFrontMatter(t *testing.T) {
 	h.run(t)
 	if got := h.read(t, "pinned note.md"); strings.Contains(got, "pinned:") {
 		t.Fatalf("remote unpin not reflected in front matter: %q", got)
+	}
+}
+
+func TestLocalDeleteOfPinnedNoteUnpinsFirst(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned"}})
+	h.run(t)
+
+	name := "pinned note.md"
+	if _, err := os.Stat(filepath.Join(h.dir, name)); err != nil {
+		t.Fatalf("note was not pulled: %v", err)
+	}
+	if err := os.Remove(filepath.Join(h.dir, name)); err != nil {
+		t.Fatal(err)
+	}
+	h.run(t)
+
+	h.srv.mu.Lock()
+	hist := append([]simperium.Note(nil), h.srv.history...)
+	final := h.srv.notes["a"]
+	pushes := h.srv.pushes
+	h.srv.mu.Unlock()
+
+	if pushes != 2 || len(hist) != 2 {
+		t.Fatalf("expected 2 writes (unpin, trash), got pushes=%d history=%d", pushes, len(hist))
+	}
+	if hist[0].Deleted || containsString(hist[0].SystemTags, "pinned") {
+		t.Fatalf("first write should be an unpin, got %+v", hist[0])
+	}
+	if !hist[1].Deleted || containsString(hist[1].SystemTags, "pinned") {
+		t.Fatalf("second write should be a trash without pin, got %+v", hist[1])
+	}
+	if !final.Deleted || containsString(final.SystemTags, "pinned") {
+		t.Fatalf("final remote note = %+v", final)
 	}
 }
 

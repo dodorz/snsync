@@ -189,6 +189,11 @@ Deletions travel in both directions. Nothing is ever hard-deleted: local files
 go to `.trash/`, remote notes get `deleted: true` (Simplenote's own
 trash). A local deletion is logged as `trash  <file> (remote)`.
 
+When the locally deleted note is pinned, the deletion is propagated in two
+remote writes: first the pin is removed (`unpin  <file> (before remote trash)`),
+and only after that succeeds is the note trashed. A failed trash therefore
+still leaves the unpin recorded, and the next run finishes the deletion.
+
 Because a missing local file normally means "delete it remotely", a state file
 that no longer matches the directory (for example after the directory was moved
 or restored from a backup) used to look like a deliberate mass deletion. The

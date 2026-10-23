@@ -987,6 +987,7 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 				}
 			}
 		}
+		unpinFirst := w.finalDeleted && !w.createRemote && containsString(w.finalSystemTags, "pinned")
 		note := simperium.Note{
 			Content:          w.finalContent,
 			Deleted:          w.finalDeleted,
@@ -1001,6 +1002,9 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			note.CreationDate = w.remote.Note.CreationDate
 		}
 
+		if unpinFirst {
+			e.Log("unpin  %s (before remote trash)", w.displayName())
+		}
 		if w.finalDeleted {
 			// A local deletion is propagated as a remote trash (deleted=true).
 			// Log it as such instead of calling it a push: a mass cleanup then
@@ -1032,6 +1036,31 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 		} else {
 			if err := e.keepOverwrittenBody(w); err != nil {
 				return err
+			}
+			if unpinFirst {
+				// Remove the pin first, then trash the note. Two writes mean a
+				// failed delete still leaves the unpin recorded.
+				unpinned := applyPinned(w.finalSystemTags, false)
+				unpinNote := note
+				unpinNote.Deleted = false
+				unpinNote.SystemTags = nonNil(unpinned)
+				if _, _, err := e.sn.Save(w.st.ServerKey, unpinNote); err != nil {
+					return err
+				}
+				note.SystemTags = nonNil(unpinned)
+				w.finalSystemTags = unpinned
+				// Persist the unpin so an interrupted trash cannot resurrect the
+				// note on the next run.
+				if e.st.Notes == nil {
+					e.st.Notes = map[string]*store.NoteState{}
+				}
+				w.st.SystemTags = unpinned
+				w.st.Deleted = false
+				w.st.ModTime = now
+				e.st.Notes[w.id] = w.st
+				if err := e.st.Save(); err != nil {
+					return fmt.Errorf("save state after unpin: %w", err)
+				}
 			}
 			if _, _, err := e.sn.Save(w.st.ServerKey, note); err != nil {
 				return err
