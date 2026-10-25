@@ -224,6 +224,46 @@ func TestFrontMatterPinnedComposes(t *testing.T) {
 	}
 }
 
+func TestSetFrontMatterField(t *testing.T) {
+	cases := []struct {
+		front string
+		key   string
+		value string
+		want  string
+	}{
+		{"", "share_url", "https://x/y", "---\nshare_url: \"https://x/y\"\n---\n"},
+		{"---\ntitle: x\nshare_url: old\n---\n", "share_url", "new", "---\ntitle: x\nshare_url: new\n---\n"},
+		{"---\ntitle: x\nshare_url: old\n---\n", "share_url", "", "---\ntitle: x\n---\n"},
+		{"+++\nx = 1\n+++\n", "share_url", "x", "+++\nx = 1\n+++\n"},
+	}
+	for _, tc := range cases {
+		if got := SetFrontMatterField(tc.front, tc.key, tc.value); got != tc.want {
+			t.Errorf("SetFrontMatterField(%q, %q, %q) = %q, want %q",
+				tc.front, tc.key, tc.value, got, tc.want)
+		}
+	}
+}
+
+// applyLocal runs these setters in order; the result must be stable across runs.
+func TestFrontMatterFieldsCompose(t *testing.T) {
+	build := func(front string) string {
+		front = SetFrontMatterID(front, "abc")
+		front = SetFrontMatterTags(front, []string{"a"})
+		front = SetFrontMatterPinned(front, true)
+		front = SetFrontMatterField(front, "share_url", "https://x/y")
+		return SetFrontMatterField(front, "publish_url", "https://p/y")
+	}
+	got := build("---\ntitle: x\n---\n")
+	want := "---\ntitle: x\nsimplenote_id: abc\ntags:\n  - a\npinned: true\n" +
+		"share_url: \"https://x/y\"\npublish_url: \"https://p/y\"\n---\n"
+	if got != want {
+		t.Fatalf("first pass = %q, want %q", got, want)
+	}
+	if again := build(got); again != got {
+		t.Fatalf("second pass is not stable: %q -> %q", got, again)
+	}
+}
+
 func TestEncodeNoteUsesCRLF(t *testing.T) {
 	got := EncodeNote("---\ntitle: x\n---\n", "a\nb")
 	want := "---\r\ntitle: x\r\n---\r\na\r\nb"

@@ -17,6 +17,8 @@ type NoteState struct {
 	BaseHash   string   `json:"base_hash,omitempty"`
 	Tags       []string `json:"tags,omitempty"`
 	SystemTags []string `json:"system_tags,omitempty"`
+	ShareURL   string   `json:"share_url,omitempty"`
+	PublishURL string   `json:"publish_url,omitempty"`
 	Deleted    bool     `json:"deleted,omitempty"`
 	Version    int      `json:"version,omitempty"`
 	ModTime    float64  `json:"mod_time,omitempty"`

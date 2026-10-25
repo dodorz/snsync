@@ -505,6 +505,7 @@ func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simpe
 		st: &store.NoteState{
 			ID: remoteID, ServerKey: remoteID, BaseHash: store.HashContent(r.Note.Content),
 			Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
+			ShareURL: r.Note.ShareURL, PublishURL: r.Note.PublishURL,
 		},
 		remote:           &r,
 		remoteExists:     true,
@@ -727,6 +728,28 @@ func (w *work) withLocalPin(base []string) []string {
 	return applyPinned(base, w.localPinned)
 }
 
+// shareURL returns the note's current share URL, preferring the remote value.
+func (w *work) shareURL() string {
+	if w.remoteExists {
+		return w.remote.Note.ShareURL
+	}
+	if w.st != nil {
+		return w.st.ShareURL
+	}
+	return ""
+}
+
+// publishURL returns the note's current publish URL, preferring the remote value.
+func (w *work) publishURL() string {
+	if w.remoteExists {
+		return w.remote.Note.PublishURL
+	}
+	if w.st != nil {
+		return w.st.PublishURL
+	}
+	return ""
+}
+
 // mergeTags returns the union of a and b, keeping the order of a first.
 func mergeTags(a, b []string) []string {
 	out := make([]string, 0, len(a)+len(b))
@@ -912,6 +935,8 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		front := store.SetFrontMatterID(w.localFront, w.noteID())
 		front = store.SetFrontMatterTags(front, w.finalTags)
 		front = store.SetFrontMatterPinned(front, containsString(w.finalSystemTags, "pinned"))
+		front = store.SetFrontMatterField(front, "share_url", w.shareURL())
+		front = store.SetFrontMatterField(front, "publish_url", w.publishURL())
 		if oldPath != "" && oldPath != target && store.Exists(oldPath) {
 			e.Log("rename %s -> %s", w.localFilename, w.finalFilename)
 			if !dryRun {
@@ -974,17 +999,23 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 		if !w.createRemote && !w.updateRemote {
 			continue
 		}
-		// In incremental mode a local deletion is propagated without having
-		// fetched the note; fetch it first so its content is not wiped.
-		if w.needRemoteContent && w.st != nil && w.st.ServerKey != "" {
+		// In incremental mode a tracked note is not in the index. Fetch it when
+		// its content is needed (deletion) or when its server-managed metadata
+		// (share/publish URLs and timestamps) must be preserved.
+		needMeta := w.updateRemote && !w.createRemote && w.remote == nil
+		if (w.needRemoteContent || needMeta) && w.st != nil && w.st.ServerKey != "" {
 			if rn, err := e.sn.Get(w.st.ServerKey); err == nil && rn != nil {
-				w.finalContent = rn.Content
-				if w.finalTags == nil {
-					w.finalTags = rn.Tags
+				if w.needRemoteContent {
+					w.finalContent = rn.Content
+					if w.finalTags == nil {
+						w.finalTags = rn.Tags
+					}
+					if w.finalSystemTags == nil {
+						w.finalSystemTags = rn.SystemTags
+					}
 				}
-				if w.finalSystemTags == nil {
-					w.finalSystemTags = rn.SystemTags
-				}
+				w.st.ShareURL = rn.ShareURL
+				w.st.PublishURL = rn.PublishURL
 			}
 		}
 		unpinFirst := w.finalDeleted && !w.createRemote && containsString(w.finalSystemTags, "pinned")
@@ -995,8 +1026,8 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 			ModificationDate: now,
 			Tags:             nonNil(w.finalTags),
 			SystemTags:       nonNil(w.finalSystemTags),
-			ShareURL:         "",
-			PublishURL:       "",
+			ShareURL:         w.shareURL(),
+			PublishURL:       w.publishURL(),
 		}
 		if w.remoteExists && w.remote.Note.CreationDate > 0 {
 			note.CreationDate = w.remote.Note.CreationDate
@@ -1115,6 +1146,8 @@ func (e *Engine) recordProgress(w *work) {
 	w.st.BaseHash = store.HashContent(w.finalContent)
 	w.st.Tags = w.finalTags
 	w.st.SystemTags = w.finalSystemTags
+	w.st.ShareURL = w.shareURL()
+	w.st.PublishURL = w.publishURL()
 	w.st.Deleted = w.finalDeleted
 	if w.finalFilename != "" {
 		w.st.Filename = w.finalFilename
@@ -1149,6 +1182,8 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 		}
 		if w.st != nil {
 			ns.ServerKey = w.st.ServerKey
+			ns.ShareURL = w.st.ShareURL
+			ns.PublishURL = w.st.PublishURL
 		}
 		if w.remoteExists {
 			if ns.ServerKey == "" {
@@ -1156,6 +1191,8 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 			}
 			ns.Version = w.remote.Version
 			ns.ModTime = w.remote.Note.ModificationDate
+			ns.ShareURL = w.remote.Note.ShareURL
+			ns.PublishURL = w.remote.Note.PublishURL
 		}
 		ns.Filename = w.finalFilename
 		next[id] = ns

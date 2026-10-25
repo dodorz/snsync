@@ -933,6 +933,33 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 	}
 }
 
+func TestFrontMatterMirrorsShareURLs(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{
+		Content:    "shared note",
+		ShareURL:   "https://share.example/abc",
+		PublishURL: "https://publish.example/abc",
+	})
+	h.run(t)
+
+	got := h.read(t, "shared note.md")
+	for _, want := range []string{
+		`share_url: "https://share.example/abc"`,
+		`publish_url: "https://publish.example/abc"`,
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("front matter missing %q: %q", want, got)
+		}
+	}
+
+	// A local edit must not clear the server-managed share/publish URLs.
+	h.write(t, "shared note.md", "shared note, edited")
+	h.run(t)
+	if _, n := h.noteByContent("shared note, edited"); n.ShareURL != "https://share.example/abc" || n.PublishURL != "https://publish.example/abc" {
+		t.Fatalf("share/publish cleared on edit: %+v", n)
+	}
+}
+
 func TestPinnedFrontMatter(t *testing.T) {
 	h := newHarness(t)
 	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned"}})

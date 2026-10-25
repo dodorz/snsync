@@ -266,6 +266,40 @@ func SetFrontMatterPinned(front string, pinned bool) string {
 	return "---\n" + strings.Join(out, "\n") + "\n---\n"
 }
 
+// SetFrontMatterField returns front matter with the top-level key set to value,
+// removing it when value is empty. The value is quoted when needed, and the
+// whole block is dropped when nothing is left. TOML blocks are returned
+// unchanged.
+func SetFrontMatterField(front, key, value string) string {
+	if strings.HasPrefix(front, "+++") {
+		return front
+	}
+	inner := frontMatterInner(front)
+	out := make([]string, 0, len(inner)+1)
+	skipping := false
+	for _, line := range inner {
+		if skipping {
+			trimmed := strings.TrimSpace(line)
+			if line != trimmed || strings.HasPrefix(trimmed, "-") {
+				continue // still part of the old value
+			}
+			skipping = false
+		}
+		if strings.HasPrefix(line, key+":") {
+			skipping = true
+			continue
+		}
+		out = append(out, line)
+	}
+	if value != "" {
+		out = append(out, key+": "+quoteTag(value))
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	return "---\n" + strings.Join(out, "\n") + "\n---\n"
+}
+
 // frontMatterInner returns the lines between the delimiters of front matter.
 func frontMatterInner(front string) []string {
 	if front == "" {
