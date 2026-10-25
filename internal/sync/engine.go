@@ -506,6 +506,7 @@ func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simpe
 			ID: remoteID, ServerKey: remoteID, BaseHash: store.HashContent(r.Note.Content),
 			Tags: r.Note.Tags, SystemTags: r.Note.SystemTags,
 			ShareURL: r.Note.ShareURL, PublishURL: r.Note.PublishURL,
+			CreatedAt: r.Note.CreationDate, ModTime: r.Note.ModificationDate,
 		},
 		remote:           &r,
 		remoteExists:     true,
@@ -750,6 +751,29 @@ func (w *work) publishURL() string {
 	return ""
 }
 
+// createdAt returns the note's creation time, preferring the remote value.
+func (w *work) createdAt() float64 {
+	if w.remoteExists && w.remote.Note.CreationDate > 0 {
+		return w.remote.Note.CreationDate
+	}
+	if w.st != nil {
+		return w.st.CreatedAt
+	}
+	return 0
+}
+
+// updatedAt returns the note's last modification time, preferring the remote
+// value so an incremental sync keeps the last known timestamp.
+func (w *work) updatedAt() float64 {
+	if w.remoteExists && w.remote.Note.ModificationDate > 0 {
+		return w.remote.Note.ModificationDate
+	}
+	if w.st != nil {
+		return w.st.ModTime
+	}
+	return 0
+}
+
 // mergeTags returns the union of a and b, keeping the order of a first.
 func mergeTags(a, b []string) []string {
 	out := make([]string, 0, len(a)+len(b))
@@ -937,6 +961,8 @@ func (e *Engine) applyLocal(works map[string]*work, ids []string, dryRun bool) e
 		front = store.SetFrontMatterPinned(front, containsString(w.finalSystemTags, "pinned"))
 		front = store.SetFrontMatterField(front, "share_url", w.shareURL())
 		front = store.SetFrontMatterField(front, "publish_url", w.publishURL())
+		front = store.SetFrontMatterField(front, "created", formatTimestamp(w.createdAt()))
+		front = store.SetFrontMatterField(front, "updated", formatTimestamp(w.updatedAt()))
 		if oldPath != "" && oldPath != target && store.Exists(oldPath) {
 			e.Log("rename %s -> %s", w.localFilename, w.finalFilename)
 			if !dryRun {
@@ -1016,6 +1042,12 @@ func (e *Engine) applyRemote(works map[string]*work, ids []string, dryRun bool) 
 				}
 				w.st.ShareURL = rn.ShareURL
 				w.st.PublishURL = rn.PublishURL
+				if rn.CreationDate > 0 {
+					w.st.CreatedAt = rn.CreationDate
+				}
+				if rn.ModificationDate > 0 {
+					w.st.ModTime = rn.ModificationDate
+				}
 			}
 		}
 		unpinFirst := w.finalDeleted && !w.createRemote && containsString(w.finalSystemTags, "pinned")
@@ -1148,6 +1180,7 @@ func (e *Engine) recordProgress(w *work) {
 	w.st.SystemTags = w.finalSystemTags
 	w.st.ShareURL = w.shareURL()
 	w.st.PublishURL = w.publishURL()
+	w.st.CreatedAt = w.createdAt()
 	w.st.Deleted = w.finalDeleted
 	if w.finalFilename != "" {
 		w.st.Filename = w.finalFilename
@@ -1178,10 +1211,11 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 			BaseHash:   baseHash,
 			Tags:       w.finalTags,
 			SystemTags: w.finalSystemTags,
-			ModTime:    float64(time.Now().Unix()),
 		}
 		if w.st != nil {
 			ns.ServerKey = w.st.ServerKey
+			ns.CreatedAt = w.st.CreatedAt
+			ns.ModTime = w.st.ModTime
 			ns.ShareURL = w.st.ShareURL
 			ns.PublishURL = w.st.PublishURL
 		}
@@ -1190,7 +1224,14 @@ func (e *Engine) rebuildState(works map[string]*work, ids []string, cursor strin
 				ns.ServerKey = w.remote.ID
 			}
 			ns.Version = w.remote.Version
-			ns.ModTime = w.remote.Note.ModificationDate
+			// Prefer the server's timestamps; fall back to the local record when
+			// an incremental index did not include this note.
+			if w.remote.Note.CreationDate > 0 {
+				ns.CreatedAt = w.remote.Note.CreationDate
+			}
+			if w.remote.Note.ModificationDate > 0 {
+				ns.ModTime = w.remote.Note.ModificationDate
+			}
 			ns.ShareURL = w.remote.Note.ShareURL
 			ns.PublishURL = w.remote.Note.PublishURL
 		}
@@ -1291,6 +1332,14 @@ func applyPinned(systemTags []string, pinned bool) []string {
 		out = append(out, "pinned")
 	}
 	return out
+}
+
+// formatTimestamp renders a server timestamp for the front matter.
+func formatTimestamp(ts float64) string {
+	if ts <= 0 {
+		return ""
+	}
+	return time.Unix(int64(ts), 0).UTC().Format(time.RFC3339)
 }
 
 func containsString(list []string, s string) bool {

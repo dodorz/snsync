@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dodorz/snsync/internal/config"
 	"github.com/dodorz/snsync/internal/simperium"
@@ -933,19 +934,25 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 	}
 }
 
-func TestFrontMatterMirrorsShareURLs(t *testing.T) {
+func TestFrontMatterMirrorsServerMetadata(t *testing.T) {
 	h := newHarness(t)
 	h.srv.put("a", simperium.Note{
-		Content:    "shared note",
-		ShareURL:   "https://share.example/abc",
-		PublishURL: "https://publish.example/abc",
+		Content:          "shared note",
+		ShareURL:         "https://share.example/abc",
+		PublishURL:       "https://publish.example/abc",
+		CreationDate:     1700000000,
+		ModificationDate: 1700000100,
 	})
 	h.run(t)
 
+	created := time.Unix(1700000000, 0).UTC().Format(time.RFC3339)
+	updated := time.Unix(1700000100, 0).UTC().Format(time.RFC3339)
 	got := h.read(t, "shared note.md")
 	for _, want := range []string{
 		`share_url: "https://share.example/abc"`,
 		`publish_url: "https://publish.example/abc"`,
+		`created: "` + created + `"`,
+		`updated: "` + updated + `"`,
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("front matter missing %q: %q", want, got)

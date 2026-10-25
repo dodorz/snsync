@@ -350,23 +350,26 @@ or is killed; the lock file itself can be left on disk.
   file (locally only — like everything in the front matter, the title is never
   uploaded and Simplenote keeps showing the note's first line). Remove the key
   and the name follows the body again. YAML only, as with the id.
-- `share_url` and `publish_url` mirror a published note's links:
+- `share_url` and `publish_url` mirror a published note's links, and `created`
+  and `updated` are RFC3339 timestamps:
 
   ```yaml
   share_url: "https://share.simplenote.com/..."
   publish_url: "https://publish.simplenote.com/..."
+  created: "2024-01-02T03:04:05Z"
+  updated: "2024-06-07T08:09:10Z"
   ```
 
-  These are **read-only mirrors**: they are written from the server on every
-  sync, preserved when the note is pushed, and local edits to them are ignored.
-  They are omitted when the server has no value. This is YAML-only.
+  These four are **read-only mirrors**: they are written from the server on
+  every sync, preserved when the note is pushed, and local edits to them are
+  ignored. They are omitted when the server has no value. This is YAML-only.
 - Front matter — a leading `---` (YAML) or `+++` (TOML) block — stays on disk.
-  Apart from `title`, `tags`, `pinned`, `simplenote_id`, `share_url` and
-  `publish_url`, it is ignored when comparing, hashing and uploading, and is
-  preserved when the file is updated from the server, so it never appears in
-  Simplenote. Only `tags` or `pinned` changing triggers an upload; renaming the
-  file or editing `title` or any other front matter key is invisible to the
-  server.
+  Apart from `title`, `tags`, `pinned`, `simplenote_id`, `share_url`,
+  `publish_url`, `created` and `updated`, it is ignored when comparing, hashing
+  and uploading, and is preserved when the file is updated from the server, so
+  it never appears in Simplenote. Only `tags` or `pinned` changing triggers an
+  upload; renaming the file or editing `title` or any other front matter key is
+  invisible to the server.
 - Local markdown files are written with **CRLF** (`\r\n`) line endings. Any
   line-ending style is accepted when reading, and existing files are converted
   on the next sync.

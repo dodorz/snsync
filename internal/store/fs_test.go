@@ -232,6 +232,7 @@ func TestSetFrontMatterField(t *testing.T) {
 		want  string
 	}{
 		{"", "share_url", "https://x/y", "---\nshare_url: \"https://x/y\"\n---\n"},
+		{"---\ntitle: x\n---\n", "created", "2024-01-02T03:04:05Z", "---\ntitle: x\ncreated: \"2024-01-02T03:04:05Z\"\n---\n"},
 		{"---\ntitle: x\nshare_url: old\n---\n", "share_url", "new", "---\ntitle: x\nshare_url: new\n---\n"},
 		{"---\ntitle: x\nshare_url: old\n---\n", "share_url", "", "---\ntitle: x\n---\n"},
 		{"+++\nx = 1\n+++\n", "share_url", "x", "+++\nx = 1\n+++\n"},
@@ -251,11 +252,14 @@ func TestFrontMatterFieldsCompose(t *testing.T) {
 		front = SetFrontMatterTags(front, []string{"a"})
 		front = SetFrontMatterPinned(front, true)
 		front = SetFrontMatterField(front, "share_url", "https://x/y")
-		return SetFrontMatterField(front, "publish_url", "https://p/y")
+		front = SetFrontMatterField(front, "publish_url", "https://p/y")
+		front = SetFrontMatterField(front, "created", "2024-01-02T03:04:05Z")
+		return SetFrontMatterField(front, "updated", "2024-01-02T03:04:06Z")
 	}
 	got := build("---\ntitle: x\n---\n")
 	want := "---\ntitle: x\nsimplenote_id: abc\ntags:\n  - a\npinned: true\n" +
-		"share_url: \"https://x/y\"\npublish_url: \"https://p/y\"\n---\n"
+		"share_url: \"https://x/y\"\npublish_url: \"https://p/y\"\n" +
+		"created: \"2024-01-02T03:04:05Z\"\nupdated: \"2024-01-02T03:04:06Z\"\n---\n"
 	if got != want {
 		t.Fatalf("first pass = %q, want %q", got, want)
 	}
