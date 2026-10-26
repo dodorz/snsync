@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+
+	"github.com/dodorz/snsync/internal/config"
 )
 
 // runPruneState removes bookkeeping for notes that are already in the trash.
@@ -10,8 +12,8 @@ import (
 // remember the last synced content. Trashed notes are not written locally, and
 // a full sync recognises them as deleted anyway, so keeping a tombstone for
 // every one of them only bloats the state file.
-func runPruneState(path string, dryRun bool) error {
-	_, _, st, lk, err := loadLocked(path)
+func runPruneStateProfile(p *config.Profile, dryRun bool) error {
+	_, _, st, lk, err := loadProfileLocked(p)
 	if err != nil {
 		return err
 	}

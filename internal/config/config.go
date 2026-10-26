@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -84,15 +85,59 @@ type Config struct {
 	// duration string such as "90s" or "5m", or a number of seconds.
 	WatchInterval Interval `json:"watch_interval,omitempty"`
 
-	path string
+	path    string
+	profile string // non-empty when the config came from a profiles section
 }
 
-// Load reads a config file, applies defaults and environment overrides.
-func Load(path string) (*Config, error) {
+// Profile is one named configuration section in a config file.
+type Profile struct {
+	Name   string
+	Config *Config
+}
+
+// LoadProfiles reads every profile from a config file and applies defaults and
+// environment overrides to each.
+//
+// A file may either contain a top-level "profiles" object (the new format) or
+// the legacy single-profile fields at the top level. A legacy file yields one
+// profile named "default".
+func LoadProfiles(path string) ([]*Profile, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		return nil, fmt.Errorf("parse config %s: %w", path, err)
+	}
+	if raw, ok := top["profiles"]; ok {
+		var sections map[string]*Config
+		if err := json.Unmarshal(raw, &sections); err != nil {
+			return nil, fmt.Errorf("parse config %s profiles: %w", path, err)
+		}
+		if len(sections) == 0 {
+			return nil, fmt.Errorf("config %s: no profiles defined", path)
+		}
+		names := make([]string, 0, len(sections))
+		for name := range sections {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out := make([]*Profile, 0, len(names))
+		for _, name := range names {
+			c := sections[name]
+			if c == nil {
+				c = &Config{}
+			}
+			c.path = path
+			c.profile = name
+			c.applyDefaults()
+			c.applyEnv()
+			out = append(out, &Profile{Name: name, Config: c})
+		}
+		return out, nil
+	}
+
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
@@ -100,7 +145,39 @@ func Load(path string) (*Config, error) {
 	c.path = path
 	c.applyDefaults()
 	c.applyEnv()
-	return &c, nil
+	return []*Profile{{Name: "default", Config: &c}}, nil
+}
+
+// LoadProfile loads one named profile.
+func LoadProfile(path, name string) (*Profile, error) {
+	profiles, err := LoadProfiles(path)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range profiles {
+		if p.Name == name {
+			return p, nil
+		}
+	}
+	return nil, fmt.Errorf("config %s: no profile %q", path, name)
+}
+
+// Load reads a config file as a single profile. It errors when the file defines
+// more than one profile; use LoadProfiles or LoadProfile for those.
+func Load(path string) (*Config, error) {
+	profiles, err := LoadProfiles(path)
+	if err != nil {
+		return nil, err
+	}
+	if len(profiles) == 1 {
+		return profiles[0].Config, nil
+	}
+	for _, p := range profiles {
+		if p.Name == "default" {
+			return p.Config, nil
+		}
+	}
+	return nil, fmt.Errorf("config %s defines %d profiles; choose one with --profile", path, len(profiles))
 }
 
 func (c *Config) applyDefaults() {
@@ -178,20 +255,56 @@ func (c *Config) Validate() error {
 // Path returns the file the config was loaded from.
 func (c *Config) Path() string { return c.path }
 
-// Save writes the config back atomically, preserving the cached token.
+// Save writes the config back atomically, preserving the cached token. In a
+// multi-profile file only this section is replaced; the others are kept.
 func (c *Config) Save() error {
 	if c.path == "" {
 		return fmt.Errorf("config: no path to save to")
 	}
-	if err := os.MkdirAll(filepath.Dir(c.path), 0o755); err != nil {
-		return err
+	if c.profile == "" {
+		b, err := json.MarshalIndent(c, "", "  ")
+		if err != nil {
+			return err
+		}
+		return writeAtomic(c.path, append(b, '\n'))
 	}
-	b, err := json.MarshalIndent(c, "", "  ")
+
+	b, err := os.ReadFile(c.path)
+	if err != nil {
+		return fmt.Errorf("read config: %w", err)
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		return fmt.Errorf("parse config %s: %w", c.path, err)
+	}
+	sections := map[string]json.RawMessage{}
+	if raw, ok := top["profiles"]; ok {
+		if err := json.Unmarshal(raw, &sections); err != nil {
+			return fmt.Errorf("parse config %s profiles: %w", c.path, err)
+		}
+	}
+	body, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-	b = append(b, '\n')
-	tmp, err := os.CreateTemp(filepath.Dir(c.path), ".config-*.tmp")
+	sections[c.profile] = body
+	pb, err := json.MarshalIndent(sections, "", "  ")
+	if err != nil {
+		return err
+	}
+	top["profiles"] = pb
+	out, err := json.MarshalIndent(top, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeAtomic(c.path, append(out, '\n'))
+}
+
+func writeAtomic(path string, b []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config-*.tmp")
 	if err != nil {
 		return err
 	}
@@ -204,7 +317,7 @@ func (c *Config) Save() error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, c.path)
+	return os.Rename(tmpName, path)
 }
 
 // expandHome expands a leading "~" path component to the current user's home

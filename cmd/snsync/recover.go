@@ -14,8 +14,8 @@ import (
 // re-pins the note when that version still had the "pinned" system tag.
 //
 // It is a dry run unless --yes is given.
-func runRecoverPins(path string, yes bool) error {
-	cfg, sn, st, lk, err := loadLocked(path)
+func runRecoverPinsProfile(p *config.Profile, yes bool) error {
+	cfg, sn, st, lk, err := loadProfileLocked(p)
 	if err != nil {
 		return err
 	}

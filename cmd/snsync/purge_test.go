@@ -109,7 +109,7 @@ func TestPurgeTrashUsesStateTombstones(t *testing.T) {
 	cfgPath, api, _ := purgeHarness(t, state, nil)
 
 	// Dry run first: no DELETE.
-	if err := runPurgeTrash(cfgPath, 48*time.Hour, false, 2, false, false); err != nil {
+	if err := runPurgeTrashProfile(mustProfile(t, cfgPath), 48*time.Hour, false, 2, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if len(api.requested) != 0 {
@@ -119,7 +119,7 @@ func TestPurgeTrashUsesStateTombstones(t *testing.T) {
 		t.Fatalf("state tombstones should avoid the index, got %d calls", api.indexCalls)
 	}
 
-	if err := runPurgeTrash(cfgPath, 48*time.Hour, true, 2, false, false); err != nil {
+	if err := runPurgeTrashProfile(mustProfile(t, cfgPath), 48*time.Hour, true, 2, false, false); err != nil {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"recent", "gone"} {
@@ -163,7 +163,7 @@ func TestPurgeTrashFallsBackToRemoteIndex(t *testing.T) {
 	cfgPath, api, _ := purgeHarness(t, state, notes)
 
 	// No tombstones -> the index is consulted, and the orphan is kept.
-	if err := runPurgeTrash(cfgPath, 48*time.Hour, true, 2, false, false); err != nil {
+	if err := runPurgeTrashProfile(mustProfile(t, cfgPath), 48*time.Hour, true, 2, false, false); err != nil {
 		t.Fatal(err)
 	}
 	if api.indexCalls == 0 {
@@ -181,7 +181,7 @@ func TestPurgeTrashFallsBackToRemoteIndex(t *testing.T) {
 	}
 
 	// The explicit override also deletes the orphan.
-	if err := runPurgeTrash(cfgPath, 48*time.Hour, true, 2, true, true); err != nil {
+	if err := runPurgeTrashProfile(mustProfile(t, cfgPath), 48*time.Hour, true, 2, true, true); err != nil {
 		t.Fatal(err)
 	}
 	if !api.requested["orphan"] {

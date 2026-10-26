@@ -38,7 +38,7 @@ func TestPruneStateDropsTrashedNotes(t *testing.T) {
 	}
 
 	// A dry run must leave the file alone.
-	if err := runPruneState(cfgPath, true); err != nil {
+	if err := runPruneStateProfile(mustProfile(t, cfgPath), true); err != nil {
 		t.Fatal(err)
 	}
 	got, err := store.LoadState(statePath)
@@ -49,7 +49,7 @@ func TestPruneStateDropsTrashedNotes(t *testing.T) {
 		t.Fatalf("dry run changed the state: %d entries", len(got.Notes))
 	}
 
-	if err := runPruneState(cfgPath, false); err != nil {
+	if err := runPruneStateProfile(mustProfile(t, cfgPath), false); err != nil {
 		t.Fatal(err)
 	}
 	got, err = store.LoadState(statePath)

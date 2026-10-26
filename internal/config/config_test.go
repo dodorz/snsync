@@ -89,3 +89,71 @@ func TestApplyDefaultsFillsPaths(t *testing.T) {
 		t.Errorf("FullSyncEvery = %d, want 10", c.FullSyncEvery)
 	}
 }
+
+func TestLoadProfilesLegacySingle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := os.WriteFile(path, []byte(`{"email":"a@b","local_dir":"/tmp/a"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadProfiles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 1 || ps[0].Name != "default" {
+		t.Fatalf("profiles = %+v", ps)
+	}
+	if ps[0].Config.Email != "a@b" || ps[0].Config.LocalDir != "/tmp/a" {
+		t.Fatalf("config = %+v", ps[0].Config)
+	}
+}
+
+func TestLoadProfilesSections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"profiles":{"work":{"email":"w@x","local_dir":"/tmp/w"},"home":{"email":"h@x","local_dir":"/tmp/h"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadProfiles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 2 || ps[0].Name != "home" || ps[1].Name != "work" {
+		t.Fatalf("profiles = %+v", ps)
+	}
+	if ps[0].Config.Email != "h@x" || ps[1].Config.Email != "w@x" {
+		t.Fatalf("configs = %+v / %+v", ps[0].Config, ps[1].Config)
+	}
+	if _, err := LoadProfile(path, "nope"); err == nil {
+		t.Error("LoadProfile(nope) should fail")
+	}
+}
+
+func TestSaveProfileKeepsOtherSections(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"profiles":{"work":{"email":"w@x","local_dir":"/tmp/w"},"home":{"email":"h@x","local_dir":"/tmp/h"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	home, err := LoadProfile(path, "home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	home.Config.Token = "tok"
+	if err := home.Config.Save(); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := LoadProfiles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]*Config{}
+	for _, p := range ps {
+		byName[p.Name] = p.Config
+	}
+	if byName["home"].Token != "tok" {
+		t.Errorf("home token not saved: %+v", byName["home"])
+	}
+	if byName["work"].Email != "w@x" || byName["work"].LocalDir != "/tmp/w" {
+		t.Errorf("work section changed: %+v", byName["work"])
+	}
+}

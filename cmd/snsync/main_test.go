@@ -4,10 +4,12 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"testing"
 	"time"
 
+	"github.com/dodorz/snsync/internal/config"
 	"github.com/dodorz/snsync/internal/lock"
 )
 
@@ -59,6 +61,16 @@ func TestParseArgs(t *testing.T) {
 			want: options{command: "login", configPath: defaultConfigPath(), token: "abc"},
 		},
 		{
+			name: "profile selection",
+			args: []string{"sync", "--profile", "work,home", "--profile=extra"},
+			want: options{command: "sync", configPath: defaultConfigPath(), profiles: []string{"work", "home", "extra"}},
+		},
+		{
+			name:    "empty profile",
+			args:    []string{"sync", "--profile="},
+			wantErr: true,
+		},
+		{
 			name:    "bad interval",
 			args:    []string{"watch", "--interval", "nope"},
 			wantErr: true,
@@ -91,7 +103,7 @@ func TestParseArgs(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if *got != tc.want {
+			if !reflect.DeepEqual(*got, tc.want) {
 				t.Fatalf("got %+v want %+v", *got, tc.want)
 			}
 		})
@@ -113,7 +125,61 @@ func TestRunSyncSkipsWhenLocked(t *testing.T) {
 	}
 	defer lk.Release()
 
-	if err := runSync(cfgPath, false, false, false); !errors.Is(err, lock.ErrHeld) {
-		t.Fatalf("runSync: got %v, want ErrHeld", err)
+	ps, err := config.LoadProfiles(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runSyncProfile(ps[0], false, false, false); !errors.Is(err, lock.ErrHeld) {
+		t.Fatalf("runSyncProfile: got %v, want ErrHeld", err)
+	}
+}
+
+func mustProfile(t *testing.T, path string) *config.Profile {
+	t.Helper()
+	ps, err := config.LoadProfiles(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return ps[0]
+}
+
+func TestSelectProfiles(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"profiles":{"a":{"email":"a@x","local_dir":"/tmp/a"},"b":{"email":"b@x","local_dir":"/tmp/b"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	all, err := selectProfiles(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all[0].Name != "a" || all[1].Name != "b" {
+		t.Fatalf("all = %+v", all)
+	}
+
+	one, err := selectProfiles(path, []string{"b"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(one) != 1 || one[0].Name != "b" {
+		t.Fatalf("selected = %+v", one)
+	}
+
+	if _, err := selectProfiles(path, []string{"nope"}); err == nil {
+		t.Fatal("unknown profile should fail")
+	}
+}
+
+func TestSelectProfilesRejectsSharedState(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{"profiles":{"a":{"email":"a@x","local_dir":"/tmp/same"},"b":{"email":"b@x","local_dir":"/tmp/same"}}}`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := selectProfiles(path, nil); err == nil {
+		t.Fatal("profiles sharing a state file should fail")
 	}
 }

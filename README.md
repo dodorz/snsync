@@ -92,6 +92,10 @@ git tag 0.1.9 && git push origin 0.1.9
 # 2. sync (run it as often as you like; it is idempotent)
 ./snsync sync
 
+# only some profiles (default: all profiles in the config file)
+./snsync sync --profile work
+./snsync sync --profile work,personal
+
 # preview without touching anything
 ./snsync sync -dry-run
 
@@ -125,20 +129,39 @@ git tag 0.1.9 && git push origin 0.1.9
 ```
 
 Config lives at `~/.config/snsync/config.json` by default; use `-c path` to
-point elsewhere.
+point elsewhere. A file can hold several named profiles (sections):
 
 ```json
 {
-  "email": "you@example.com",
-  "local_dir": "~/Notes",
-  "app_id": "chalk-bump-f49",
-  "app_key": "26864ab5d6fd4a37b80343439f107350",
-  "full_sync_every": 10,
-  "watch_interval": "90s"
+  "profiles": {
+    "work": {
+      "email": "you@work.example.com",
+      "local_dir": "~/Notes/work",
+      "watch_interval": "5m"
+    },
+    "personal": {
+      "email": "you@example.com",
+      "local_dir": "~/Notes/personal"
+    }
+  }
 }
 ```
 
-All keys except `email` and `local_dir` are optional:
+Every command uses **all profiles by default**; `--profile` selects one or more
+(repeatable, or comma-separated):
+
+```sh
+./snsync sync --profile work
+./snsync sync --profile work,personal
+./snsync status --profile personal
+```
+
+Every profile has its own `local_dir`, state file, trash directory, credentials
+and cached token, so profiles never touch each other's bookkeeping. The old flat
+format (fields at the top level) is still accepted and treated as a single
+profile named `default`.
+
+All keys except `email` and `local_dir` are optional within each profile:
 
 | key | default | meaning |
 |---|---|---|
@@ -266,7 +289,9 @@ so a lost state file cannot turn into an endless stream of duplicate notes.
 key, default 60s), then repeats until interrupted with Ctrl-C. The first pass is a full reconciliation (or
 forced full with `--full`); later passes use the incremental cursor and the
 periodic full-sync counter. Transient errors (network) are logged and retried
-on the next tick; an authentication error stops the loop.
+on the next tick; an authentication error stops the loop. When several profiles
+are selected they are synced one after another on each tick, using the smallest
+configured `watch_interval`.
 
 A single HTTP request gets five minutes, which must cover downloading an
 entire index page; requests are retried (see above) before a sync is declared

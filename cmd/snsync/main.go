@@ -41,21 +41,33 @@ func main() {
 	case "init":
 		err = runInit(opts.configPath)
 	case "login":
-		err = runLogin(opts.configPath, opts.token)
+		err = runLoginProfiles(opts.configPath, opts.profiles, opts.token)
 	case "sync":
-		err = runSync(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete)
+		err = forEachProfile(opts.configPath, opts.profiles, func(p *config.Profile) error {
+			return runSyncProfile(p, opts.dryRun, opts.full, opts.allowMassDelete)
+		})
 	case "watch":
-		err = runWatch(opts.configPath, opts.dryRun, opts.full, opts.allowMassDelete, opts.interval, opts.intervalSet)
+		err = runWatchProfiles(opts.configPath, opts.profiles, opts.dryRun, opts.full, opts.allowMassDelete, opts.interval, opts.intervalSet)
 	case "status":
-		err = runStatus(opts.configPath)
+		err = forEachProfile(opts.configPath, opts.profiles, func(p *config.Profile) error {
+			return runStatusProfile(p)
+		})
 	case "rename":
-		err = runRename(opts.configPath, opts.dryRun)
+		err = forEachProfile(opts.configPath, opts.profiles, func(p *config.Profile) error {
+			return runRenameProfile(p, opts.dryRun)
+		})
 	case "purge-trash":
-		err = runPurgeTrash(opts.configPath, opts.since, opts.yes, opts.jobs, opts.purgeOrphans, opts.purgeRemote)
+		err = forEachProfile(opts.configPath, opts.profiles, func(p *config.Profile) error {
+			return runPurgeTrashProfile(p, opts.since, opts.yes, opts.jobs, opts.purgeOrphans, opts.purgeRemote)
+		})
 	case "prune-state":
-		err = runPruneState(opts.configPath, opts.dryRun)
+		err = forEachProfile(opts.configPath, opts.profiles, func(p *config.Profile) error {
+			return runPruneStateProfile(p, opts.dryRun)
+		})
 	case "recover-pins":
-		err = runRecoverPins(opts.configPath, opts.yes)
+		err = forEachProfile(opts.configPath, opts.profiles, func(p *config.Profile) error {
+			return runRecoverPinsProfile(p, opts.yes)
+		})
 	case "version":
 		fmt.Printf("snsync %s\n", version)
 	case "help":
@@ -100,6 +112,8 @@ type options struct {
 	purgeOrphans bool
 	// purgeRemote scans the full remote index instead of the state tombstones.
 	purgeRemote bool
+	// profiles selects config sections; empty means every profile.
+	profiles []string
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -117,6 +131,22 @@ func parseArgs(args []string) (*options, error) {
 			o.configPath = strings.TrimPrefix(a, "-c=")
 		case strings.HasPrefix(a, "--config="):
 			o.configPath = strings.TrimPrefix(a, "--config=")
+		case a == "--profile" || a == "-profile":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			names := splitProfiles(args[i])
+			if len(names) == 0 {
+				return nil, fmt.Errorf("--profile needs a name")
+			}
+			o.profiles = append(o.profiles, names...)
+		case strings.HasPrefix(a, "--profile="):
+			names := splitProfiles(strings.TrimPrefix(a, "--profile="))
+			if len(names) == 0 {
+				return nil, fmt.Errorf("--profile needs a name")
+			}
+			o.profiles = append(o.profiles, names...)
 		case a == "--token" || a == "-token":
 			if i+1 >= len(args) {
 				return nil, fmt.Errorf("%s needs a value", a)
@@ -225,11 +255,15 @@ func runInit(path string) error {
 		return err
 	}
 	body := `{
-  "email": "you@example.com",
-  "password": "",
-  "local_dir": "~/Notes",
-  "app_id": "` + config.DefaultAppID + `",
-  "app_key": "` + config.DefaultAppKey + `"
+  "profiles": {
+    "default": {
+      "email": "you@example.com",
+      "password": "",
+      "local_dir": "~/Notes",
+      "app_id": "` + config.DefaultAppID + `",
+      "app_key": "` + config.DefaultAppKey + `"
+    }
+  }
 }
 `
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
@@ -239,11 +273,23 @@ func runInit(path string) error {
 	return nil
 }
 
-func runLogin(path, token string) error {
-	cfg, err := config.Load(path)
-	if err != nil {
-		return err
+// runLoginProfiles resolves a stdin token once and then logs in every selected
+// profile.
+func runLoginProfiles(path string, names []string, token string) error {
+	if token != "" {
+		norm, err := normalizeToken(token)
+		if err != nil {
+			return err
+		}
+		token = norm
 	}
+	return forEachProfile(path, names, func(p *config.Profile) error {
+		return runLoginProfile(p, token)
+	})
+}
+
+func runLoginProfile(p *config.Profile, token string) error {
+	cfg := p.Config
 	if err := cfg.Validate(); err != nil {
 		return err
 	}
@@ -251,26 +297,22 @@ func runLogin(path, token string) error {
 	// A token obtained elsewhere (e.g. the Simplenote web app cookie) can be
 	// used directly, which avoids the often-blocked auth host entirely.
 	if token != "" {
-		norm, err := normalizeToken(token)
-		if err != nil {
-			return err
-		}
-		sn := newClient(cfg, norm)
+		sn := newClient(cfg, token)
 		if err := sn.Ping(); err != nil {
 			return fmt.Errorf("token rejected by %s: %w", sn.APIHost, err)
 		}
-		cfg.Token = norm
+		cfg.Token = token
 		if err := cfg.Save(); err != nil {
 			return err
 		}
-		fmt.Printf("token verified and cached in %s\n", path)
+		fmt.Printf("token verified and cached for %s in %s\n", p.Name, cfg.Path())
 		return nil
 	}
 
 	if cfg.Token != "" {
 		sn := newClient(cfg, cfg.Token)
 		if err := sn.Ping(); err == nil {
-			fmt.Printf("cached token in %s is still valid\n", path)
+			fmt.Printf("cached token for %s in %s is still valid\n", p.Name, cfg.Path())
 			return nil
 		}
 	}
@@ -287,7 +329,7 @@ func runLogin(path, token string) error {
 	if err := cfg.Save(); err != nil {
 		return err
 	}
-	fmt.Printf("logged in as %s, token cached in %s\n", cfg.Email, path)
+	fmt.Printf("logged in as %s (%s), token cached in %s\n", cfg.Email, p.Name, cfg.Path())
 	return nil
 }
 
@@ -327,8 +369,8 @@ func newClient(cfg *config.Config, token string) *simperium.Client {
 	return sn
 }
 
-func runSync(path string, dry, full, allowMassDelete bool) error {
-	cfg, sn, st, lk, err := loadLocked(path)
+func runSyncProfile(p *config.Profile, dry, full, allowMassDelete bool) error {
+	cfg, sn, st, lk, err := loadProfileLocked(p)
 	if err != nil {
 		return err
 	}
@@ -350,42 +392,76 @@ func runSync(path string, dry, full, allowMassDelete bool) error {
 	return nil
 }
 
-func runWatch(path string, dry, full, allowMassDelete bool, interval time.Duration, intervalSet bool) error {
-	cfg, sn, st, lk, err := loadLocked(path)
+type watchRunner struct {
+	profile *config.Profile
+	cfg     *config.Config
+	eng     *syncpkg.Engine
+	lk      *lock.Lock
+	first   bool
+}
+
+func runWatchProfiles(path string, names []string, dry, full, allowMassDelete bool, interval time.Duration, intervalSet bool) error {
+	ps, err := selectProfiles(path, names)
 	if err != nil {
 		return err
 	}
-	// A watch session owns the state directory for its whole lifetime, so a
-	// cron-driven `sync` skips instead of racing it.
-	defer lk.Release()
-	if !intervalSet {
-		if interval, err = cfg.WatchEvery(); err != nil {
-			return err
+	runners := make([]*watchRunner, 0, len(ps))
+	release := func() {
+		for _, r := range runners {
+			_ = r.lk.Release()
 		}
 	}
-	eng := syncpkg.New(cfg, sn, st)
-	eng.AllowMassDelete = allowMassDelete
-	eng.Log = func(format string, args ...any) {
-		fmt.Printf(format+"\n", args...)
+	for _, p := range ps {
+		cfg, sn, st, lk, err := loadProfileLocked(p)
+		if err != nil {
+			release()
+			return err
+		}
+		eng := syncpkg.New(cfg, sn, st)
+		eng.AllowMassDelete = allowMassDelete
+		if len(ps) > 1 {
+			name := p.Name
+			eng.Log = func(format string, args ...any) {
+				fmt.Printf("["+name+"] "+format+"\n", args...)
+			}
+		} else {
+			eng.Log = func(format string, args ...any) {
+				fmt.Printf(format+"\n", args...)
+			}
+		}
+		runners = append(runners, &watchRunner{profile: p, cfg: cfg, eng: eng, lk: lk, first: true})
+	}
+	// A watch session owns the state directories for its whole lifetime, so a
+	// cron-driven `sync` skips instead of racing it.
+	defer release()
+
+	if !intervalSet {
+		if interval, err = watchInterval(runners); err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	fmt.Printf("watching every %s (Ctrl-C to stop)\n", interval)
-	first := true
+	fmt.Printf("watching %d profile(s) every %s (Ctrl-C to stop)\n", len(runners), interval)
 	for {
-		// Force a full sync on the first pass only; later passes use the
-		// incremental cursor and the periodic full-sync counter.
-		eng.Full = full && first
-		if err := eng.Run(dry); err != nil {
-			var authErr *simperium.AuthError
-			if errors.As(err, &authErr) {
-				return err
+		for _, r := range runners {
+			// Force a full sync on the first pass only; later passes use the
+			// incremental cursor and the periodic full-sync counter.
+			r.eng.Full = full && r.first
+			if err := r.eng.Run(dry); err != nil {
+				var authErr *simperium.AuthError
+				if errors.As(err, &authErr) {
+					if len(runners) > 1 {
+						return fmt.Errorf("%s: %w", r.profile.Name, err)
+					}
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "[%s] sync error: %v\n", r.profile.Name, err)
+			} else {
+				r.first = false
 			}
-			fmt.Fprintf(os.Stderr, "sync error: %v\n", err)
-		} else {
-			first = false
 		}
 
 		select {
@@ -397,8 +473,24 @@ func runWatch(path string, dry, full, allowMassDelete bool, interval time.Durati
 	}
 }
 
-func runStatus(path string) error {
-	_, _, st, err := load(path)
+// watchInterval uses the smallest configured interval so no profile is polled
+// less often than it asked for.
+func watchInterval(runners []*watchRunner) (time.Duration, error) {
+	best := time.Duration(0)
+	for i, r := range runners {
+		d, err := r.cfg.WatchEvery()
+		if err != nil {
+			return 0, fmt.Errorf("%s: %w", r.profile.Name, err)
+		}
+		if i == 0 || d < best {
+			best = d
+		}
+	}
+	return best, nil
+}
+
+func runStatusProfile(p *config.Profile) error {
+	_, _, st, err := loadProfile(p)
 	if err != nil {
 		return err
 	}
@@ -425,11 +517,8 @@ func runStatus(path string) error {
 
 // runRename renames local files to match the sync naming rule (front matter
 // "title", falling back to the body's first line) without touching the server.
-func runRename(path string, dryRun bool) error {
-	cfg, err := config.Load(path)
-	if err != nil {
-		return err
-	}
+func runRenameProfile(p *config.Profile, dryRun bool) error {
+	cfg := p.Config
 	if cfg.LocalDir == "" {
 		return fmt.Errorf("config: local_dir is required")
 	}
@@ -499,13 +588,102 @@ func updateStateFilenames(path string, renames []syncpkg.Rename) error {
 	return st.Save()
 }
 
-// loadLocked loads the config and state while holding the per-state-directory
-// lock. The caller must release the returned lock when it is finished.
-func loadLocked(path string) (*config.Config, *simperium.Client, *store.State, *lock.Lock, error) {
-	cfg, err := config.Load(path)
+// selectProfiles loads the config file and returns the requested profiles, or
+// all of them when names is empty.
+func selectProfiles(path string, names []string) ([]*config.Profile, error) {
+	all, err := config.LoadProfiles(path)
 	if err != nil {
-		return nil, nil, nil, nil, err
+		return nil, err
 	}
+	if len(names) == 0 {
+		if err := checkProfileStates(all); err != nil {
+			return nil, err
+		}
+		return all, nil
+	}
+	byName := make(map[string]*config.Profile, len(all))
+	for _, p := range all {
+		byName[p.Name] = p
+	}
+	var out []*config.Profile
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		p, ok := byName[name]
+		if !ok {
+			return nil, fmt.Errorf("unknown profile %q (available: %s)", name, strings.Join(profileNames(all), ", "))
+		}
+		out = append(out, p)
+	}
+	if err := checkProfileStates(out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// checkProfileStates rejects two selected profiles that share a state file:
+// they would overwrite each other's bookkeeping and fight over the lock.
+func checkProfileStates(ps []*config.Profile) error {
+	seen := make(map[string]string, len(ps))
+	for _, p := range ps {
+		if p.Config.StateFile == "" {
+			continue
+		}
+		key := filepath.Clean(p.Config.StateFile)
+		if other, ok := seen[key]; ok {
+			return fmt.Errorf("profiles %q and %q use the same state file %s", other, p.Name, key)
+		}
+		seen[key] = p.Name
+	}
+	return nil
+}
+
+func profileNames(ps []*config.Profile) []string {
+	names := make([]string, len(ps))
+	for i, p := range ps {
+		names[i] = p.Name
+	}
+	return names
+}
+
+// forEachProfile runs fn for each selected profile, with a short header when
+// more than one profile is active.
+func forEachProfile(path string, names []string, fn func(*config.Profile) error) error {
+	ps, err := selectProfiles(path, names)
+	if err != nil {
+		return err
+	}
+	for _, p := range ps {
+		if len(ps) > 1 {
+			fmt.Printf("== %s ==\n", p.Name)
+		}
+		if err := fn(p); err != nil {
+			if len(ps) > 1 {
+				return fmt.Errorf("%s: %w", p.Name, err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+func splitProfiles(s string) []string {
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// loadProfileLocked loads a profile and its state while holding the
+// per-state-directory lock. The caller must release the returned lock.
+func loadProfileLocked(p *config.Profile) (*config.Config, *simperium.Client, *store.State, *lock.Lock, error) {
+	cfg := p.Config
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, nil, nil, err
 	}
@@ -525,11 +703,8 @@ func loadLocked(path string) (*config.Config, *simperium.Client, *store.State, *
 	return cfg, sn, st, lk, nil
 }
 
-func load(path string) (*config.Config, *simperium.Client, *store.State, error) {
-	cfg, err := config.Load(path)
-	if err != nil {
-		return nil, nil, nil, err
-	}
+func loadProfile(p *config.Profile) (*config.Config, *simperium.Client, *store.State, error) {
+	cfg := p.Config
 	if err := cfg.Validate(); err != nil {
 		return nil, nil, nil, err
 	}
@@ -575,6 +750,8 @@ commands:
 
 flags:
   -c, --config <path>   config file (default ~/.config/snsync/config.json)
+      --profile <name>  config profile/section to use; repeatable or
+                        comma-separated (default: all profiles)
       --dry-run         show what would happen without writing anything
       --full            force a full reconciliation (ignore the cursor)
       --allow-mass-delete

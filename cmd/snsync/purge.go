@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dodorz/snsync/internal/config"
 	"github.com/dodorz/snsync/internal/simperium"
 	"github.com/dodorz/snsync/internal/store"
 )
@@ -27,8 +28,8 @@ type purgeTarget struct {
 // needs no network round-trip beyond the deletes themselves. When the state
 // has no tombstones left (for example after `prune-state`), or when --remote is
 // given, the full remote index is scanned instead.
-func runPurgeTrash(path string, since time.Duration, yes bool, jobs int, purgeOrphans, forceRemote bool) error {
-	_, sn, st, lk, err := loadLocked(path)
+func runPurgeTrashProfile(p *config.Profile, since time.Duration, yes bool, jobs int, purgeOrphans, forceRemote bool) error {
+	_, sn, st, lk, err := loadProfileLocked(p)
 	if err != nil {
 		return err
 	}
