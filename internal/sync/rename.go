@@ -15,15 +15,16 @@ type Rename struct {
 	To   string
 }
 
-// PlanLocalRenames computes the names the local markdown files should have,
-// using the same rule as sync: the front matter "title" when present, otherwise
-// the first non-empty line of the body. A name that already follows the rule
-// (including a " (2)" uniquifier) is left alone.
+// PlanLocalRenames computes the names the local note files should have, using
+// the same rule as sync: the front matter "title" when present, otherwise the
+// first non-empty line of the body. A name that already follows the rule
+// (including a " (2)" uniquifier) is left alone, and so is the file's existing
+// extension: an existing file keeps being a .md, a .txt or whatever it is.
 //
 // Existing entries that are not part of the plan stay reserved, so a rename
 // never overwrites an unrelated file or directory.
 func PlanLocalRenames(dir string) ([]Rename, error) {
-	names, err := store.ListMarkdown(dir)
+	names, err := store.ListNotes(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
@@ -35,6 +36,7 @@ func PlanLocalRenames(dir string) ([]Rename, error) {
 	type item struct {
 		name  string
 		stem  string
+		ext   string
 		match bool
 	}
 	items := make([]item, 0, len(names))
@@ -49,7 +51,7 @@ func PlanLocalRenames(dir string) ([]Rename, error) {
 			title = Title(body)
 		}
 		stem := Sanitize(title)
-		items = append(items, item{name: name, stem: stem, match: stemOf(name) == stem})
+		items = append(items, item{name: name, stem: stem, ext: filepath.Ext(name), match: stemOf(name) == stem})
 	}
 
 	entries, err := os.ReadDir(dir)
@@ -74,9 +76,9 @@ func PlanLocalRenames(dir string) ([]Rename, error) {
 		if it.match {
 			continue
 		}
-		name := it.stem + ".md"
+		name := it.stem + it.ext
 		for i := 2; taken[name] || used[name]; i++ {
-			name = it.stem + " (" + itoa(i) + ").md"
+			name = it.stem + " (" + itoa(i) + ")" + it.ext
 		}
 		used[name] = true
 		out = append(out, Rename{From: it.name, To: name})

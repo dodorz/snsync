@@ -13,8 +13,8 @@ snsync pull/push/delete
 Simplenote is a great minimal cross-device scratchpad, but its public API is
 gone. This tool reuses the community-maintained Simperium credentials that
 sncli ships (the only ones explicitly shared for third-party use) and presents
-the account as a plain directory of `.md` files, so any editor, script or
-version-control workflow can read and write it.
+the account as a plain directory of `.md` (or `.txt`) files, so any editor,
+script or version-control workflow can read and write it.
 
 ## Install
 
@@ -202,7 +202,7 @@ current server state, and the current local file.
 | changed | unchanged | push |
 | unchanged | changed | pull |
 | changed | changed, equal | converge |
-| changed | changed, different | **conflict**: pull remote, save local as `… (conflict).md` and push it as a new note |
+| changed | changed, different | **conflict**: pull remote, save local as `… (conflict)` and push it as a new note |
 | deleted | unchanged | move remote note to the trash |
 | deleted | changed | restore the remote version |
 | unchanged | deleted | move the local file to `.trash/` |
@@ -310,7 +310,7 @@ or is killed; the lock file itself can be left on disk.
 
 ### Files and names
 
-- One `.md` file per note. The file name is derived from the note title — its
+- One file per note, named after the note title — its
   front matter's `title` when the file declares one, otherwise the body's first
   non-empty line — so a **manual rename is still undone** on the next sync:
   change one of those two instead. What a rename no longer does is split the
@@ -325,6 +325,16 @@ or is killed; the lock file itself can be left on disk.
   exactly as before. Run `snsync rename` to apply the naming rule to existing
   files without contacting the server (`--dry-run` previews it); it also updates
   the state file, so the next sync sees no renames.
+- Extensions: a file that already exists keeps its own extension, whatever it
+  is (`.md`, `.txt`, `.markdown`, …) — the extension plays no part in matching,
+  renaming or uploading, so this only matters for files the sync creates. A
+  note pulled for the first time becomes `… .md` when the server marks it with
+  its `markdown` system tag (as the Simplenote app does for markdown notes) and
+  `… .txt` otherwise. Uploading ignores the extension: a local `.txt` file is
+  pushed like any other note. When scanning the directory for new files, note
+  files are the ones with a `.md`, `.markdown` or `.txt` extension; a file the
+  state file already tracks is read by its recorded name whatever its
+  extension.
 - `snsync` records which Simplenote note each file belongs to in the front
   matter:
 
@@ -360,8 +370,8 @@ or is killed; the lock file itself can be left on disk.
 
   A missing key means `false`, so deleting the line (or setting it to `false`)
   unpins on the next sync. This is YAML-only: files with `+++` (TOML) front
-  matter keep the server's pin. The `markdown` system tag is still kept only in
-  the state file.
+  matter keep the server's pin. The `markdown` system tag is kept only in the
+  state file; it decides the extension of pulled notes (see above).
 - A file that declares its own `title` keeps that name:
 
   ```yaml
@@ -395,7 +405,7 @@ or is killed; the lock file itself can be left on disk.
   it never appears in Simplenote. Only `tags` or `pinned` changing triggers an
   upload; renaming the file or editing `title` or any other front matter key is
   invisible to the server.
-- Local markdown files are written with **CRLF** (`\r\n`) line endings. Any
+- Local note files are written with **CRLF** (`\r\n`) line endings. Any
   line-ending style is accepted when reading, and existing files are converted
   on the next sync.
 - Bookkeeping is kept in `<local_dir>/.snsync/state.json`; the trash is

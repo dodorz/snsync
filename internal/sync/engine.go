@@ -74,6 +74,11 @@ type work struct {
 	localPinnedKnown bool
 	localHash        string
 	localFilename    string
+	// localExt is the file extension (with the dot) of the file this note is
+	// linked to, if any. An existing local file keeps its own extension, so
+	// only notes without one get an extension picked from the server's
+	// "markdown" system tag.
+	localExt string
 	// decision
 	finalContent    string
 	finalTags       []string
@@ -118,6 +123,7 @@ func (w *work) noteID() string {
 // either a manual rename of a tracked note or a brand new note.
 type localFile struct {
 	name        string
+	ext         string // file extension with the dot, e.g. ".md"
 	front       string
 	body        string
 	title       string
@@ -247,6 +253,10 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		if w.st.Filename == "" {
 			continue
 		}
+		// The extension is remembered even when the file is gone, so a note
+		// restored from the server comes back under the name it had before
+		// instead of being renamed to the extension the markdown tag implies.
+		w.localExt = filepath.Ext(w.st.Filename)
 		p := filepath.Join(e.cfg.LocalDir, w.st.Filename)
 		full, err := store.ReadFile(p)
 		if err != nil {
@@ -276,7 +286,7 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 
 	// Files on disk that no tracked note claims: manual renames or brand new
 	// notes.
-	files, _ := store.ListMarkdown(e.cfg.LocalDir)
+	files, _ := store.ListNotes(e.cfg.LocalDir)
 	claimed := map[string]bool{}
 	for _, w := range works {
 		if w.localExists {
@@ -342,7 +352,7 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 		tags, tagsSet := store.FrontMatterTags(front)
 		pinned, pinnedOK := store.FrontMatterPinned(front)
 		strays = append(strays, &localFile{
-			name: name, front: front, body: body,
+			name: name, ext: filepath.Ext(name), front: front, body: body,
 			title: title, titleSet: titleSet,
 			tags: tags, tagsSet: tagsSet,
 			pinned: pinned, pinnedKnown: !strings.HasPrefix(front, "+++") && (pinnedOK || e.st.PinnedInFile),
@@ -448,6 +458,7 @@ func (e *Engine) buildWorks(remoteByID map[string]simperium.RemoteNote) map[stri
 			localContent:     f.body,
 			localHash:        f.hash,
 			localFilename:    f.name,
+			localExt:         f.ext,
 		}
 	}
 
@@ -489,6 +500,7 @@ func (e *Engine) adoptRename(w *work, f *localFile, how string) {
 	w.localContent = f.body
 	w.localHash = f.hash
 	w.localFilename = f.name
+	w.localExt = f.ext
 	e.Log("adopt  %s -> %s (%s)", f.name, w.st.Filename, how)
 }
 
@@ -521,6 +533,7 @@ func (e *Engine) adoptRemote(works map[string]*work, remoteByID map[string]simpe
 		localContent:     f.body,
 		localHash:        f.hash,
 		localFilename:    f.name,
+		localExt:         f.ext,
 	}
 	works[remoteID] = w
 	e.Log("adopt  %s (existing note %s)", f.name, remoteID)
@@ -832,6 +845,7 @@ func (e *Engine) addConflictCopies(works map[string]*work) {
 			id:               id,
 			st:               &store.NoteState{ID: id},
 			localFront:       w.localFront,
+			localExt:         w.localExt,
 			localTitle:       w.localTitle,
 			localTitleSet:    w.localTitleSet,
 			localTags:        w.localTags,
@@ -864,10 +878,17 @@ func (w *work) filenameTitle() string {
 }
 
 // assignFilenames gives every note that stays on disk its file name.
+//
+// A note that is already linked to a local file keeps that file's extension
+// (".md", ".txt" or anything else the user chose): how a file happens to be
+// named locally is not the sync's business. A note that is about to be created
+// gets ".md" when the server marks it as markdown (the "markdown" system tag)
+// and ".txt" otherwise.
 func (e *Engine) assignFilenames(works map[string]*work) {
 	type target struct {
 		w    *work
 		stem string
+		ext  string
 	}
 	var targets []target
 	for _, id := range sortedIDs(works) {
@@ -879,7 +900,11 @@ func (e *Engine) assignFilenames(works map[string]*work) {
 		if w.conflictCopy {
 			stem += " (conflict)"
 		}
-		targets = append(targets, target{w, stem})
+		ext := w.localExt
+		if ext == "" {
+			ext = noteExtension(w.finalSystemTags)
+		}
+		targets = append(targets, target{w, stem, ext})
 	}
 
 	taken := map[string]bool{}
@@ -895,13 +920,23 @@ func (e *Engine) assignFilenames(works map[string]*work) {
 		if t.w.finalFilename != "" {
 			continue
 		}
-		name := t.stem + ".md"
+		name := t.stem + t.ext
 		for i := 2; taken[name]; i++ {
-			name = t.stem + " (" + itoa(i) + ").md"
+			name = t.stem + " (" + itoa(i) + ")" + t.ext
 		}
 		taken[name] = true
 		t.w.finalFilename = name
 	}
+}
+
+// noteExtension picks the extension for a locally created note: notes the
+// server marks with the "markdown" system tag become .md files, everything else
+// becomes plain text.
+func noteExtension(systemTags []string) string {
+	if containsString(systemTags, "markdown") {
+		return ".md"
+	}
+	return ".txt"
 }
 
 // assignKeys makes sure every note that is going to be written has a server

@@ -404,10 +404,11 @@ func writeAtomic(path, content string) error {
 	return os.Rename(tmpName, path)
 }
 
-// ListMarkdown returns the relative names of markdown files directly inside
-// dir. Hidden entries (including the .snsync directory) and subdirectories are
-// skipped.
-func ListMarkdown(dir string) ([]string, error) {
+// ListNotes returns the relative names of note files directly inside dir.
+// Both markdown (.md) and plain text (.txt) files are notes: the extension of
+// a file that already exists locally is not otherwise interpreted. Hidden
+// entries (including the .snsync directory) and subdirectories are skipped.
+func ListNotes(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, err
@@ -421,13 +422,24 @@ func ListMarkdown(dir string) ([]string, error) {
 		if strings.HasPrefix(name, ".") {
 			continue
 		}
-		if !strings.EqualFold(filepath.Ext(name), ".md") {
+		if !IsNoteName(name) {
 			continue
 		}
 		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out, nil
+}
+
+// IsNoteName reports whether a file name is treated as a note: .md, .markdown
+// and .txt, in any case. A file that the state file already links to a note is
+// read by its recorded name regardless of its extension.
+func IsNoteName(name string) bool {
+	switch strings.ToLower(filepath.Ext(name)) {
+	case ".md", ".markdown", ".txt":
+		return true
+	}
+	return false
 }
 
 // WriteToTrash writes content into trashDir under name (uniquified like

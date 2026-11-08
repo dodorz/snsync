@@ -545,7 +545,7 @@ func TestPullNewRemoteNote(t *testing.T) {
 	h := newHarness(t)
 	h.srv.put("abc", simperium.Note{
 		Content: "from the server", Tags: []string{"work"},
-		SystemTags: []string{"pinned"},
+		SystemTags: []string{"pinned", "markdown"},
 	})
 	h.run(t)
 
@@ -582,7 +582,7 @@ func TestMassLocalDeleteIsRefused(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range entries {
-		if strings.HasSuffix(e.Name(), ".md") {
+		if store.IsNoteName(e.Name()) {
 			if err := os.Remove(filepath.Join(h.dir, e.Name())); err != nil {
 				t.Fatal(err)
 			}
@@ -667,13 +667,13 @@ func TestFullSyncDoesNotAccumulateTrash(t *testing.T) {
 
 func TestRemoteDeleteTrashesLocal(t *testing.T) {
 	h := newHarness(t)
-	h.srv.put("xyz", simperium.Note{Content: "to be trashed"})
+	h.srv.put("xyz", simperium.Note{Content: "to be trashed", SystemTags: []string{"markdown"}})
 	h.run(t)
 	if _, err := os.Stat(filepath.Join(h.dir, "to be trashed.md")); err != nil {
 		t.Fatalf("note was not pulled: %v", err)
 	}
 
-	h.srv.put("xyz", simperium.Note{Content: "to be trashed", Deleted: true})
+	h.srv.put("xyz", simperium.Note{Content: "to be trashed", Deleted: true, SystemTags: []string{"markdown"}})
 	h.run(t)
 
 	if _, err := os.Stat(filepath.Join(h.dir, "to be trashed.md")); !os.IsNotExist(err) {
@@ -723,7 +723,7 @@ func TestConflictCreatesCopy(t *testing.T) {
 
 func TestIncrementalPullDoesNotDeleteUntouchedNotes(t *testing.T) {
 	h := newHarness(t)
-	h.srv.put("a", simperium.Note{Content: "alpha"})
+	h.srv.put("a", simperium.Note{Content: "alpha", SystemTags: []string{"markdown"}})
 	h.run(t)
 	if _, err := os.Stat(filepath.Join(h.dir, "alpha.md")); err != nil {
 		t.Fatalf("alpha not pulled: %v", err)
@@ -732,7 +732,7 @@ func TestIncrementalPullDoesNotDeleteUntouchedNotes(t *testing.T) {
 		t.Fatalf("a full sync should not bump the incremental counter, got %d", h.st.IncrementalSinceFull)
 	}
 
-	h.srv.put("b", simperium.Note{Content: "beta"})
+	h.srv.put("b", simperium.Note{Content: "beta", SystemTags: []string{"markdown"}})
 	h.run(t)
 
 	if _, err := os.Stat(filepath.Join(h.dir, "beta.md")); err != nil {
@@ -884,7 +884,7 @@ func TestFrontMatterTitleControlsFilename(t *testing.T) {
 
 func TestPullPreservesFrontMatter(t *testing.T) {
 	h := newHarness(t)
-	h.srv.put("a", simperium.Note{Content: "old body"})
+	h.srv.put("a", simperium.Note{Content: "old body", SystemTags: []string{"markdown"}})
 	h.run(t)
 
 	st := h.stateByServerKey("a")
@@ -893,7 +893,7 @@ func TestPullPreservesFrontMatter(t *testing.T) {
 	}
 	// Attach front matter locally, then let the server change the body.
 	h.write(t, st.Filename, "---\nsite: docs\n---\nold body")
-	h.srv.put("a", simperium.Note{Content: "new body"})
+	h.srv.put("a", simperium.Note{Content: "new body", SystemTags: []string{"markdown"}})
 	h.run(t)
 
 	got := h.read(t, "new body.md")
@@ -910,7 +910,7 @@ func TestPullPreservesFrontMatter(t *testing.T) {
 
 func TestTagsLiveInFrontMatter(t *testing.T) {
 	h := newHarness(t)
-	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"work"}})
+	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"work"}, SystemTags: []string{"markdown"}})
 	h.run(t)
 
 	// Server tags are written into the file's front matter.
@@ -927,7 +927,7 @@ func TestTagsLiveInFrontMatter(t *testing.T) {
 	}
 
 	// A remote tag change is written back into the file.
-	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"remote"}})
+	h.srv.put("a", simperium.Note{Content: "tagged note", Tags: []string{"remote"}, SystemTags: []string{"markdown"}})
 	h.run(t)
 	if got := h.read(t, "tagged note.md"); !strings.Contains(got, "tags:\r\n  - remote") {
 		t.Fatalf("remote tags not written to front matter: %q", got)
@@ -938,6 +938,7 @@ func TestFrontMatterMirrorsServerMetadata(t *testing.T) {
 	h := newHarness(t)
 	h.srv.put("a", simperium.Note{
 		Content:          "shared note",
+		SystemTags:       []string{"markdown"},
 		ShareURL:         "https://share.example/abc",
 		PublishURL:       "https://publish.example/abc",
 		CreationDate:     1700000000,
@@ -969,7 +970,7 @@ func TestFrontMatterMirrorsServerMetadata(t *testing.T) {
 
 func TestPinnedFrontMatter(t *testing.T) {
 	h := newHarness(t)
-	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned"}})
+	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned", "markdown"}})
 	h.run(t)
 
 	// A remote pin is written to the file.
@@ -993,7 +994,7 @@ func TestPinnedFrontMatter(t *testing.T) {
 	}
 
 	// A remote unpin is reflected in the file.
-	h.srv.put("a", simperium.Note{Content: "pinned note"})
+	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"markdown"}})
 	h.run(t)
 	if got := h.read(t, "pinned note.md"); strings.Contains(got, "pinned:") {
 		t.Fatalf("remote unpin not reflected in front matter: %q", got)
@@ -1002,7 +1003,7 @@ func TestPinnedFrontMatter(t *testing.T) {
 
 func TestLocalDeleteOfPinnedNoteUnpinsFirst(t *testing.T) {
 	h := newHarness(t)
-	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned"}})
+	h.srv.put("a", simperium.Note{Content: "pinned note", SystemTags: []string{"pinned", "markdown"}})
 	h.run(t)
 
 	name := "pinned note.md"
@@ -1039,7 +1040,7 @@ func TestLocalDeleteOfPinnedNoteUnpinsFirst(t *testing.T) {
 func TestUpgradeDoesNotUnpin(t *testing.T) {
 	h := newHarness(t)
 	const body = "old pinned note"
-	h.srv.put("a", simperium.Note{Content: body, SystemTags: []string{"pinned"}})
+	h.srv.put("a", simperium.Note{Content: body, SystemTags: []string{"pinned", "markdown"}})
 
 	// Simulate a pre-pin state file: tracked, unchanged, pinned, but the local
 	// file has no "pinned" key.
@@ -1104,7 +1105,7 @@ func TestLostStateAdoptsExistingNote(t *testing.T) {
 	if len(h.srv.notes) != 1 {
 		t.Fatalf("lost state duplicated the server note: %d notes", len(h.srv.notes))
 	}
-	files, err := store.ListMarkdown(h.dir)
+	files, err := store.ListNotes(h.dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1146,7 +1147,7 @@ func TestDuplicatesFromLostStateDoNotMultiply(t *testing.T) {
 	if len(h.srv.notes) != notes {
 		t.Fatalf("recovery changed the server note count: %d -> %d", notes, len(h.srv.notes))
 	}
-	files, _ := store.ListMarkdown(h.dir)
+	files, _ := store.ListNotes(h.dir)
 	if len(files) != 2 {
 		t.Fatalf("expected both copies locally, got %v", files)
 	}
@@ -1156,7 +1157,117 @@ func TestDuplicatesFromLostStateDoNotMultiply(t *testing.T) {
 	if h.srv.pushes != pushes {
 		t.Fatalf("follow-up sync pushed more notes: %d -> %d", pushes, h.srv.pushes)
 	}
-	if got, _ := store.ListMarkdown(h.dir); len(got) != 2 {
+	if got, _ := store.ListNotes(h.dir); len(got) != 2 {
 		t.Fatalf("follow-up sync created more files: %v", got)
+	}
+}
+
+// A note pulled from the server gets .md when the server marks it as markdown
+// and .txt otherwise.
+func TestPullPicksExtensionFromSystemTags(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("md", simperium.Note{Content: "markdown note", SystemTags: []string{"markdown"}})
+	h.srv.put("txt", simperium.Note{Content: "plain note"})
+	h.run(t)
+
+	if _, err := os.Stat(filepath.Join(h.dir, "markdown note.md")); err != nil {
+		t.Fatalf("markdown note not written as .md: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "plain note.txt")); err != nil {
+		t.Fatalf("plain note not written as .txt: %v", err)
+	}
+}
+
+// An existing local file keeps its own extension, even when the sync would
+// otherwise name it from the server's markdown tag.
+func TestExistingFileKeepsItsExtension(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "notes.txt", "hello world")
+	h.run(t)
+
+	if _, err := os.Stat(filepath.Join(h.dir, "hello world.txt")); err != nil {
+		t.Fatalf("existing .txt file was given another extension: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(h.dir, "hello world.md")); !os.IsNotExist(err) {
+		t.Fatal("a second .md file was created for the same note")
+	}
+
+	// Same for a file renamed by the user.
+	if err := os.Rename(filepath.Join(h.dir, "hello world.txt"), filepath.Join(h.dir, "custom.txt")); err != nil {
+		t.Fatal(err)
+	}
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "hello world.txt")); err != nil {
+		t.Fatalf("renamed file was not restored under its title: %v", err)
+	}
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("rename created a duplicate note: %d notes", len(h.srv.notes))
+	}
+}
+
+// A .txt file pushed to the server still yields the same file locally: the
+// upload does not care about the extension.
+func TestTxtFileRoundTrips(t *testing.T) {
+	h := newHarness(t)
+	h.write(t, "image.txt", "not really markdown")
+	h.run(t)
+	h.run(t)
+
+	files, err := store.ListNotes(h.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(files) != 1 || files[0] != "not really markdown.txt" {
+		t.Fatalf("unexpected files after two syncs: %v", files)
+	}
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("expected 1 server note, got %d", len(h.srv.notes))
+	}
+}
+
+// Changing a note's markdown tag on the server must not rename an existing
+// local file.
+func TestRemoteMarkdownTagDoesNotRenameLocalFile(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "body", SystemTags: []string{"markdown"}})
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "body.md")); err != nil {
+		t.Fatalf("note not pulled as .md: %v", err)
+	}
+
+	h.srv.put("a", simperium.Note{Content: "body"})
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "body.md")); err != nil {
+		t.Fatalf("dropping the markdown tag renamed the file: %v", err)
+	}
+
+	h.srv.put("a", simperium.Note{Content: "body", SystemTags: []string{"markdown"}})
+	h.run(t)
+	if _, err := os.Stat(filepath.Join(h.dir, "body.md")); err != nil {
+		t.Fatalf("re-adding the markdown tag renamed the file: %v", err)
+	}
+}
+
+// A tracked file may carry any extension; the sync keeps whatever the user
+// chose instead of forcing .md or .txt on it.
+func TestTrackedFileKeepsUnusualExtension(t *testing.T) {
+	h := newHarness(t)
+	h.srv.put("a", simperium.Note{Content: "body", SystemTags: []string{"markdown"}})
+	h.run(t)
+
+	name := h.stateByServerKey("a").Filename
+	if err := os.Rename(filepath.Join(h.dir, name), filepath.Join(h.dir, "body.markdown")); err != nil {
+		t.Fatal(err)
+	}
+	h.run(t)
+
+	if _, err := os.Stat(filepath.Join(h.dir, "body.markdown")); err != nil {
+		t.Fatalf("file extension was not kept: %v", err)
+	}
+	if got := h.stateByServerKey("a").Filename; got != "body.markdown" {
+		t.Fatalf("state records %q, want body.markdown", got)
+	}
+	if len(h.srv.notes) != 1 {
+		t.Fatalf("rename created a duplicate note: %d notes", len(h.srv.notes))
 	}
 }

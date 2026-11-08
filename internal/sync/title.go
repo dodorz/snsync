@@ -53,21 +53,6 @@ func isReserved(name string) bool {
 	return reserved[strings.ToLower(name)]
 }
 
-// FilenameFor builds a unique "<title>.md" name that is not in taken. When the
-// title collides, " (2)", " (3)", ... is appended. If suffix is non-empty it
-// is inserted before the uniquifier, e.g. "note (conflict).md".
-func FilenameFor(content string, suffix string, taken map[string]bool) string {
-	stem := Sanitize(Title(content))
-	if suffix != "" {
-		stem = stem + " " + suffix
-	}
-	name := stem + ".md"
-	for i := 2; taken[name]; i++ {
-		name = stem + " (" + itoa(i) + ").md"
-	}
-	return name
-}
-
 func truncateRunes(s string, n int) string {
 	r := []rune(s)
 	if len(r) <= n {
