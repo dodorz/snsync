@@ -22,7 +22,8 @@ script or version-control workflow can read and write it.
 
 Prebuilt binaries for Linux and macOS (amd64 + arm64) are attached to every
 [release](https://github.com/dodorz/snsync/releases), and Windows builds ship
-as a `.7z` archive containing `snsync.exe` and `README.md`:
+as a `.7z` archive containing `snsync.exe` and `README.md` (a `.zip` with the
+same contents is published next to it for `snsync upgrade`):
 
 ```sh
 # Linux / macOS
@@ -46,6 +47,34 @@ go install github.com/dodorz/snsync/cmd/snsync@latest
 
 `go install` builds without a version number, so `snsync version` prints `dev`.
 Use the release binary or `make build` if you want a real version string.
+
+### Updating
+
+`snsync` can update itself from GitHub releases:
+
+```sh
+snsync update          # is a newer release out? (read only)
+snsync upgrade         # download it and replace this binary
+snsync upgrade --dry-run   # show what would be installed
+```
+
+The binary is downloaded for the running platform, checked against the
+release's `checksums.txt` when one is published, and swapped in atomically (on
+Windows the old `.exe` is moved aside and deleted on the next start). Nothing is
+touched when the version is already current, and `--tag <version>` installs a
+specific release instead of the latest one.
+
+`update` and `upgrade` talk to `api.github.com` and the release CDN, so they
+work even when the Simplenote auth host is blocked. `SN_UPDATE_API` points them
+at a mirror of the GitHub API and `SN_UPDATE_REPO` at a fork:
+
+```sh
+SN_UPDATE_API=https://github.example/api/v3 SN_UPDATE_REPO=me/snsync snsync update
+```
+
+A self-built binary reports `dev`; `upgrade` still lets you install a
+release, which is a convenient way to switch from a local build to a published
+one.
 
 ### From source
 
@@ -126,6 +155,10 @@ git tag 0.2.0 && git push origin 0.2.0
 # restore pins removed by 0.1.9 (dry run first; reads server version history)
 ./snsync recover-pins
 ./snsync recover-pins --yes
+
+# check for / install a newer snsync release
+./snsync update
+./snsync upgrade
 ```
 
 Config lives at `~/.config/snsync/config.json` by default; use `-c path` to
