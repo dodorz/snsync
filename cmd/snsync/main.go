@@ -20,6 +20,7 @@ import (
 	"github.com/dodorz/snsync/internal/simperium"
 	"github.com/dodorz/snsync/internal/store"
 	syncpkg "github.com/dodorz/snsync/internal/sync"
+	"github.com/dodorz/snsync/internal/update"
 )
 
 // version is the program version. It defaults to "dev" and is overridden at
@@ -27,6 +28,10 @@ import (
 var version = "dev"
 
 func main() {
+	// A previous upgrade on Windows may have left the old binary behind;
+	// it can only be removed once it is no longer running.
+	update.CleanupOldBinaries()
+
 	opts, err := parseArgs(os.Args[1:])
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -70,6 +75,10 @@ func main() {
 		})
 	case "version":
 		fmt.Printf("snsync %s\n", version)
+	case "update":
+		err = runUpdateCheck(newUpdateClient(), version, opts.updateTag, os.Stdout)
+	case "upgrade":
+		err = runUpgrade(newUpdateClient(), version, opts.updateTag, opts.dryRun, os.Stdout)
 	case "help":
 		usage()
 	default:
@@ -114,6 +123,9 @@ type options struct {
 	purgeRemote bool
 	// profiles selects config sections; empty means every profile.
 	profiles []string
+	// updateTag pins update/upgrade to a specific release instead of
+	// the latest one.
+	updateTag string
 }
 
 func parseArgs(args []string) (*options, error) {
@@ -217,6 +229,14 @@ func parseArgs(args []string) (*options, error) {
 			o.jobs = n
 		case a == "-h" || a == "--help":
 			o.command = "help"
+		case a == "--tag" || a == "-tag":
+			if i+1 >= len(args) {
+				return nil, fmt.Errorf("%s needs a value", a)
+			}
+			i++
+			o.updateTag = strings.TrimPrefix(args[i], "v")
+		case strings.HasPrefix(a, "--tag="):
+			o.updateTag = strings.TrimPrefix(strings.TrimPrefix(a, "--tag="), "v")
 		case a == "-v" || a == "--version":
 			o.command = "version"
 		case strings.HasPrefix(a, "-"):
@@ -746,6 +766,8 @@ commands:
   recover-pins
             restore pins lost by 0.1.9 from the previous server version
   version   print the program version
+  update    ask GitHub whether a newer release exists (read only)
+  upgrade   download the latest release and replace this binary
   help      show this message
 
 flags:
@@ -768,6 +790,8 @@ flags:
       --interval <dur>  watch poll interval, e.g. 90s or 5m (default 60s or
                         the watch_interval config key)
       --token <value>   save a token obtained elsewhere (login only)
+      --tag <version>   update/upgrade: use this release instead of
+                        the latest one, e.g. --tag 0.3.0
   -v, --version         print the program version
 `)
 }

@@ -183,3 +183,26 @@ func TestSelectProfilesRejectsSharedState(t *testing.T) {
 		t.Fatal("profiles sharing a state file should fail")
 	}
 }
+
+func TestParseArgsUpdateFlags(t *testing.T) {
+	for _, tc := range []struct {
+		args []string
+		tag  string
+	}{
+		{[]string{"update"}, ""},
+		{[]string{"update", "--tag", "0.3.0"}, "0.3.0"},
+		{[]string{"upgrade", "--tag=v0.4.1"}, "0.4.1"},
+		{[]string{"-tag", "1.2.3", "upgrade", "--dry-run"}, "1.2.3"},
+	} {
+		got, err := parseArgs(tc.args)
+		if err != nil {
+			t.Fatalf("%v: %v", tc.args, err)
+		}
+		if got.updateTag != tc.tag {
+			t.Fatalf("%v: tag = %q, want %q", tc.args, got.updateTag, tc.tag)
+		}
+	}
+	if _, err := parseArgs([]string{"upgrade", "--tag"}); err == nil {
+		t.Fatal("--tag without a value should fail")
+	}
+}
